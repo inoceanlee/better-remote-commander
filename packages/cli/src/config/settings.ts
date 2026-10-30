@@ -83,3 +83,162 @@ export const DEFAULT_SETTINGS: Readonly<BrcSettings> = Object.freeze({
   logs: Object.freeze({ retentionDays: 7, maxTotalMiB: 50, rotateMiB: 4 }),
   runtime: Object.freeze({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 3_000 }),
 });
+
+export interface ResolvedSettings {
+  settings: BrcSettings;
+  fileSettings: BrcSettings;
+  sources: BrcSettingSources;
+}
+
+const settingKeySet = new Set<string>(BRC_SETTING_KEYS);
+
+
+function copySettings(settings: Readonly<BrcSettings>): BrcSettings {
+  return {
+    version: settings.version,
+    proxy: {
+      rate: { ...settings.proxy.rate },
+      concurrent: settings.proxy.concurrent,
+    },
+    services: { ...settings.services },
+    logs: { ...settings.logs },
+    runtime: { ...settings.runtime },
+  };
+}
+
+function applySettingValue(settings: BrcSettings, key: BrcSettingKey, value: number | string): void {
+  const [section, ...parts] = key.split('.');
+  let target = settings[section as keyof BrcSettings] as unknown as Record<string, unknown>;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    target = target[parts[index]] as Record<string, unknown>;
+  }
+  target[parts[parts.length - 1]] = value;
+}
+
+export function withSettingValue<K extends BrcSettingKey>(
+  settings: Readonly<BrcSettings>,
+  key: K,
+  value: BrcSettingValues[K],
+): BrcSettings {
+  const copy = copySettings(settings);
+  applySettingValue(copy, key, value);
+  return copy;
+}
+
+function validateSettingValue(key: BrcSettingKey, value: unknown): number | string {
+  if (key === 'proxy.rate.period') {
+    if (typeof value !== 'string' || !/^(?:\d+(?:\.\d+)?)(?:ms|s|m|h)$/.test(value) || Number.parseFloat(value) <= 0) {
+      throw new Error(`${key} must be a positive duration such as 1s.`);
+    }
+    return value;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${key} must be a finite number.`);
+  if (key === 'proxy.rate.average') {
+    if (value <= 0) throw new Error(`${key} must be greater than zero.`);
+    return value;
+  }
+  if (!Number.isSafeInteger(value)) throw new Error(`${key} must be an integer.`);
+  if (key === 'services.relayPort' || key === 'services.proxyPort' || key === 'services.healthPort') {
+    if (value < 1 || value > 65535) throw new Error(`${key} must be an integer from 1 to 65535.`);
+    return value;
+  }
+  if (key === 'logs.retentionDays') {
+    if (value < 0) throw new Error(`${key} must be zero or greater.`);
+    return value;
+  }
+  if (value < 1) throw new Error(`${key} must be greater than zero.`);
+  return value;
+}
+
+function collectFileValues(document: unknown): Map<BrcSettingKey, unknown> {
+  if (typeof document !== 'object' || document === null || Array.isArray(document)) {
+    throw new Error('Configuration YAML must contain a mapping.');
+  }
+  if ((document as Record<string, unknown>).version !== 1) {
+    throw new Error('Configuration version must be 1.');
+  }
+  const values = new Map<BrcSettingKey, unknown>();
+  const active = new WeakSet<object>();
+  const visit = (record: Record<string, unknown>, prefix = '') => {
+    if (active.has(record)) throw new Error('Configuration YAML contains a cyclic alias.');
+    active.add(record);
+    try {
+      for (const [name, value] of Object.entries(record)) {
+        const fullName = prefix ? `${prefix}.${name}` : name;
+        if (fullName === 'version') {
+          if (value !== 1) throw new Error('Configuration version must be 1.');
+          continue;
+        }
+        if (settingKeySet.has(fullName)) {
+          values.set(fullName as BrcSettingKey, value);
+          continue;
+        }
+        if (!BRC_SETTING_KEYS.some((key) => key.startsWith(`${fullName}.`))) {
+          throw new Error(`Unknown configuration key: ${fullName}`);
+        }
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw new Error(`${fullName} must be a mapping.`);
+        }
+        visit(value as Record<string, unknown>, fullName);
+      }
+    } finally {
+      active.delete(record);
+    }
+  };
+  visit(document as Record<string, unknown>);
+  return values;
+}
+
+function parseEnvironmentValue(key: BrcSettingKey, value: string): number | string {
+  if (key === 'proxy.rate.period') return validateSettingValue(key, value);
+  if (!/^-?(?:\d+)(?:\.\d+)?$/.test(value.trim())) throw new Error(`${SETTING_ENVIRONMENT_KEYS[key]} must be a number.`);
+  return validateSettingValue(key, Number(value));
+}
+
+function assertCrossFieldConstraints(settings: Readonly<BrcSettings>): void {
+  const { relayPort, proxyPort, healthPort } = settings.services;
+  if (relayPort === proxyPort || relayPort === healthPort || proxyPort === healthPort) {
+    throw new Error('Service ports must be different.');
+  }
+  if (settings.logs.rotateMiB > settings.logs.maxTotalMiB) {
+    throw new Error('logs.rotateMiB cannot exceed logs.maxTotalMiB.');
+  }
+}
+
+export function resolveSettings(document: unknown, env: NodeJS.ProcessEnv): ResolvedSettings {
+  const fileValues = collectFileValues(document);
+  const fileSettings = copySettings(DEFAULT_SETTINGS);
+  for (const key of BRC_SETTING_KEYS) {
+    if (fileValues.has(key)) {
+      applySettingValue(fileSettings, key, validateSettingValue(key, fileValues.get(key)));
+    }
+  }
+  assertCrossFieldConstraints(fileSettings);
+
+  const settings = copySettings(fileSettings);
+  const sources = {} as Record<BrcSettingKey, BrcSettingSource>;
+  for (const key of BRC_SETTING_KEYS) {
+    const environmentName = SETTING_ENVIRONMENT_KEYS[key];
+    const environmentValue = env[environmentName];
+    if (environmentValue !== undefined) {
+      const value = parseEnvironmentValue(key, environmentValue);
+      applySettingValue(settings, key, value);
+      sources[key] = 'environment';
+    } else {
+      sources[key] = fileValues.has(key) ? 'file' : 'default';
+    }
+  }
+  assertCrossFieldConstraints(settings);
+  return { settings, fileSettings, sources };
+}
+
+export function parseSettingArgument<K extends BrcSettingKey>(key: K, value: string): BrcSettingValues[K] {
+  if (key !== 'proxy.rate.period' && !/^-?(?:\d+)(?:\.\d+)?$/.test(value)) {
+    throw new Error(`${key} must be a number.`);
+  }
+  return validateSettingValue(key, key === 'proxy.rate.period' ? value : Number(value)) as BrcSettingValues[K];
+}
+
+export function isBrcSettingKey(value: string): value is BrcSettingKey {
+  return settingKeySet.has(value);
+}
