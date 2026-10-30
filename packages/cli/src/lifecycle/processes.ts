@@ -5,7 +5,8 @@ import { once } from 'node:events';
 import { mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { BrcPaths } from './paths.js';
+import type { BrcPaths } from '../config/paths.js';
+import { DEFAULT_SETTINGS } from '../config/settings.js';
 
 export type ManagedServiceName = 'relay' | 'traefik' | 'agent';
 export type ServiceState = 'stopped' | 'starting' | 'running' | 'degraded';
@@ -66,8 +67,6 @@ interface HealthInfo {
   detail: string;
 }
 
-const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
-const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 const CONTROL_REQUEST_TIMEOUT_MS = 1_000;
 
@@ -255,8 +254,8 @@ export class ProcessManager {
   private readonly starting = new Map<ManagedServiceName, number | null>();
 
   constructor(private readonly paths: BrcPaths, options: ProcessManagerOptions = {}) {
-    this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_SETTINGS.runtime.startupTimeoutMs;
+    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SETTINGS.runtime.shutdownTimeoutMs;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.inspect = options.inspectProcess ?? inspectProcess;
   }

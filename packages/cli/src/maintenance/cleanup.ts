@@ -1,10 +1,9 @@
 import { lstat, readdir, readFile, rmdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import type { BrcPaths } from './paths.js';
-import { inspectProcess, ProcessManager, type ManagedServiceName, type ProcessIdentity } from './processes.js';
+import type { BrcPaths } from '../config/paths.js';
+import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
+import { inspectProcess, ProcessManager, type ManagedServiceName, type ProcessIdentity } from '../lifecycle/processes.js';
 
-const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_LOG_BYTES = 50 * 1024 * 1024;
 const SERVICE_NAMES: ManagedServiceName[] = ['relay', 'traefik', 'agent'];
 
 export interface CleanupIssue {
@@ -22,6 +21,7 @@ export interface CleanupReport {
 
 export interface CleanupOptions {
   dryRun?: boolean;
+  settings?: Readonly<BrcSettings>;
 }
 
 interface ServiceRuntime {
@@ -325,7 +325,14 @@ async function collectLogs(paths: BrcPaths, report: CleanupReport): Promise<LogF
   return files;
 }
 
-async function cleanLogs(paths: BrcPaths, runtimes: Map<ManagedServiceName, ServiceRuntime>, report: CleanupReport, dryRun: boolean, cutoff: number): Promise<void> {
+async function cleanLogs(
+  paths: BrcPaths,
+  runtimes: Map<ManagedServiceName, ServiceRuntime>,
+  report: CleanupReport,
+  dryRun: boolean,
+  cutoff: number,
+  maxTotalBytes: number,
+): Promise<void> {
   const files = await collectLogs(paths, report);
   const active = new Set<string>();
   for (const name of SERVICE_NAMES) {
@@ -346,14 +353,14 @@ async function cleanLogs(paths: BrcPaths, runtimes: Map<ManagedServiceName, Serv
   let total = files.reduce((sum, file) => sum + (removed.has(file.path) ? 0 : file.size), 0);
   const oldestFirst = [...files].sort((left, right) => left.modifiedAt - right.modifiedAt || left.path.localeCompare(right.path));
   for (const file of oldestFirst) {
-    if (total <= MAX_LOG_BYTES) break;
+    if (total <= maxTotalBytes) break;
     if (removed.has(file.path) || active.has(path.resolve(file.path))) continue;
     if (await removeFile(paths.root, file.path, report, dryRun)) {
       removed.add(file.path);
       total -= file.size;
     }
   }
-  if (total > MAX_LOG_BYTES) issue(report.preserved, paths.logs, `Active logs exceed the ${MAX_LOG_BYTES} byte aggregate target.`);
+  if (total > maxTotalBytes) issue(report.preserved, paths.logs, `Active logs exceed the ${maxTotalBytes} byte aggregate target.`);
 }
 
 function validVersion(value: unknown): value is string {
@@ -453,6 +460,7 @@ async function cleanTraefikVersions(paths: BrcPaths, runtimes: Map<ManagedServic
 export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}): Promise<CleanupReport> {
   const report: CleanupReport = { removed: 0, bytesRemoved: 0, wouldRemove: 0, failures: [], preserved: [] };
   const dryRun = options.dryRun === true;
+  const settings = options.settings ?? DEFAULT_SETTINGS;
   let rootInfo;
   try { rootInfo = await lstat(paths.root); } catch (error) {
     if (errorCode(error) === 'ENOENT') return report;
@@ -469,9 +477,9 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
     await cleanLifecycleLock(paths, report, dryRun);
     await cleanReadyFiles(paths, report, dryRun);
   }
-  const cutoff = Date.now() - RETENTION_MS;
+  const cutoff = Date.now() - settings.logs.retentionDays * 24 * 60 * 60 * 1000;
   await cleanTemporaryFiles(paths, report, dryRun, cutoff);
-  await cleanLogs(paths, runtimes, report, dryRun, cutoff);
+  await cleanLogs(paths, runtimes, report, dryRun, cutoff, settings.logs.maxTotalMiB * 1024 * 1024);
   await cleanTraefikVersions(paths, runtimes, report, dryRun, cutoff);
   return report;
 }

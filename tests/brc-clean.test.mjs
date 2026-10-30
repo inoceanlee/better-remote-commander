@@ -6,8 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
-import { cleanRuntime } from '../packages/cli/dist/cleanup.js';
-import { ProcessManager } from '../packages/cli/dist/processes.js';
+import { cleanRuntime } from '../packages/cli/dist/maintenance/cleanup.js';
+import { ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
 import { appendRotatingLog } from '../packages/shared/dist/managed-log.js';
 
 const DAY = 24 * 60 * 60 * 1000;

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
-import { resolveBrcPaths, type BrcPaths } from './paths.js';
-import { createDefaultServices, ServiceManager } from './services.js';
-import { cleanRuntime } from './cleanup.js';
+import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
+import { DEFAULT_SETTINGS } from './config/settings.js';
+import { LifecycleLock } from './lifecycle/lock.js';
+import { createDefaultServices, ServiceManager } from './lifecycle/services.js';
+import { cleanRuntime } from './maintenance/cleanup.js';
+import { runManagedTraefikService, TraefikManager } from './traefik.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -156,11 +159,21 @@ const unavailable = async (): Promise<number> => {
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
-  const serviceManager = new ServiceManager(paths, createDefaultServices(paths));
+  const services = createDefaultServices(paths, DEFAULT_SETTINGS);
+  const traefikSpec = services.find((service) => service.name === 'traefik');
+  if (!traefikSpec) throw new Error('The Traefik service is missing from the default service set.');
+  const lifecycleLock = new LifecycleLock(paths);
+  const serviceManager = new ServiceManager(paths, services, undefined, lifecycleLock);
+  const traefikServiceManager = new ServiceManager(paths, [traefikSpec], undefined, lifecycleLock);
+  const traefikManager = new TraefikManager(paths);
   const deps: CliDependencies = {
     paths,
     commands: {
-      setup: unavailable,
+      setup: async () => {
+        await traefikManager.setup();
+        console.log('BRC setup complete.');
+        return 0;
+      },
       start: async () => {
         await serviceManager.start();
         console.log('BRC services started.');
@@ -185,7 +198,32 @@ async function main(): Promise<void> {
         return statuses.some((status) => status.state === 'degraded') ? 1 : 0;
       },
       logs: unavailable,
-      updateTraefik: unavailable,
+      updateTraefik: async () => {
+        const [status] = await traefikServiceManager.status();
+        if (status.state !== 'running' && status.state !== 'stopped') {
+          throw new Error(`Cannot update Traefik while it is ${status.state}: ${status.detail}`);
+        }
+        const wasRunning = status.state === 'running';
+        const previous = await traefikManager.currentVersion();
+        await traefikManager.update();
+        const current = await traefikManager.currentVersion();
+        if (wasRunning && current !== previous) {
+          try {
+            await traefikServiceManager.restart();
+          } catch (restartError) {
+            try {
+              await traefikManager.rollbackUpdate();
+              await traefikServiceManager.start();
+            } catch (rollbackError) {
+              throw new AggregateError([restartError, rollbackError], 'Traefik update failed and rollback could not restore the service.');
+            }
+            throw new Error(`Traefik update was rolled back because version ${current} did not start.`, { cause: restartError });
+          }
+        }
+        if (!current) throw new Error('Traefik update completed without an installed version.');
+        console.log(current === previous ? `Traefik ${current} is current.` : `Traefik updated: ${previous ?? 'not installed'} → ${current}.`);
+        return 0;
+      },
       uninstall: unavailable,
     },
     clean: async (cleanPaths) => {
@@ -203,5 +241,9 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  if (process.env.BRC_MANAGED_SERVICE === 'traefik' && process.argv.includes('--run-traefik')) {
+    await runManagedTraefikService();
+  } else {
+    await main();
+  }
 }

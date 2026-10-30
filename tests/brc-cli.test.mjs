@@ -9,7 +9,7 @@ import { test } from 'node:test';
 
 const cliEntry = fileURLToPath(new URL('../packages/cli/dist/cli.js', import.meta.url));
 const cliUrl = JSON.stringify(pathToFileURL(cliEntry).href);
-const pathsEntry = fileURLToPath(new URL('../packages/cli/dist/paths.js', import.meta.url));
+const pathsEntry = fileURLToPath(new URL('../packages/cli/dist/config/paths.js', import.meta.url));
 const pathsUrl = JSON.stringify(pathToFileURL(pathsEntry).href);
 
 function runCliProcess(args, dataRoot = path.join(os.tmpdir(), 'brc-cli-process-test'), extraEnv = {}) {

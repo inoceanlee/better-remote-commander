@@ -1,0 +1,33 @@
+http:
+  routers:
+    all:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - web
+      middlewares:
+        - force
+        - rate
+        - flight
+      service: backend
+  middlewares:
+    force:
+      headers:
+        customRequestHeaders:
+          X-BRC-Limit-Key: global-v1
+    rate:
+      rateLimit:
+        average: 10
+        period: 1s
+        burst: 30
+        sourceCriterion:
+          requestHeaderName: X-BRC-Limit-Key
+    flight:
+      inFlightReq:
+        amount: 16
+        sourceCriterion:
+          requestHeaderName: X-BRC-Limit-Key
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: @@BRC_RELAY_URL@@

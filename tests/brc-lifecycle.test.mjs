@@ -6,8 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
-import { ProcessManager, inspectProcess } from '../packages/cli/dist/processes.js';
-import { ServiceManager } from '../packages/cli/dist/services.js';
+import { ProcessManager, inspectProcess } from '../packages/cli/dist/lifecycle/processes.js';
+import { ServiceManager } from '../packages/cli/dist/lifecycle/services.js';
+import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { startManagedControlServer } from '../packages/shared/dist/managed-control.js';
 
 const fakeService = `
@@ -238,6 +239,84 @@ test('serializes lifecycle calls across manager instances sharing one runtime ro
   assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
 });
 
+test('serializes separate ServiceManagers that share a lifecycle lock', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-services-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimePaths = paths(root);
+  const processes = new FakeProcessManager({ delayMs: 30 });
+  const services = workspaceServices(root);
+  const lock = new LifecycleLock(runtimePaths);
+  const first = new ServiceManager(runtimePaths, services, processes, lock);
+  const second = new ServiceManager(runtimePaths, services, processes, lock);
+
+  const results = await Promise.allSettled([first.start(), second.restart()]);
+
+  assert.equal(processes.maxActive, 1);
+  assert.deepEqual(results.map((result) => result.status), ['fulfilled', 'fulfilled']);
+});
+
+test('rejects nested lifecycle lock acquisition', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lock = new LifecycleLock(paths(root));
+
+  await assert.rejects(
+    lock.runExclusive(() => lock.runExclusive(async () => {})),
+    /cannot be acquired recursively/i,
+  );
+});
+
+test('prevents a second CLI process from acquiring an active lifecycle lock', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimePaths = paths(root);
+  const marker = path.join(root, 'held');
+  const lock = new LifecycleLock(runtimePaths);
+  let release;
+  const released = new Promise((resolve) => { release = resolve; });
+  const owner = lock.runExclusive(async () => {
+    await writeFile(marker, 'held');
+    await released;
+  });
+  try {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        await readFile(marker, 'utf8');
+        break;
+      } catch {
+        if (attempt === 99) throw new Error('The lock owner did not start.');
+        await sleep(10);
+      }
+    }
+
+    const lockUrl = new URL('../packages/cli/dist/lifecycle/lock.js', import.meta.url).href;
+    const source = `
+      import { LifecycleLock } from ${JSON.stringify(lockUrl)};
+      await new LifecycleLock(${JSON.stringify(runtimePaths)}).runExclusive(async () => {});
+      console.log('unexpectedly acquired');
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    const result = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+
+    assert.deepEqual(result, { code: 1, signal: null }, stderr);
+    assert.equal(stdout, '');
+    assert.match(stderr, /Another BRC lifecycle operation is in progress/);
+  } finally {
+    release();
+    await owner;
+  }
+});
+
 test('persists identity and allows another CLI instance to inspect and stop the child', async (t) => {
   const harness = await makeHarness(t);
   const { manager, spec } = harness;
@@ -257,7 +336,7 @@ test('persists identity and allows another CLI instance to inspect and stop the 
 
 test('lets the CLI process exit while the managed service keeps running', async (t) => {
   const harness = await makeHarness(t);
-  const processManagerUrl = JSON.stringify(new URL('../packages/cli/dist/processes.js', import.meta.url).href);
+  const processManagerUrl = JSON.stringify(new URL('../packages/cli/dist/lifecycle/processes.js', import.meta.url).href);
   const source = `import { ProcessManager } from ${processManagerUrl};
 await new ProcessManager(${JSON.stringify(harness.paths)}, { startupTimeoutMs: 3000, shutdownTimeoutMs: 300, pollIntervalMs: 25 }).start(${JSON.stringify(harness.spec)});`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], {

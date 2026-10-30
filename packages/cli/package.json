@@ -13,6 +13,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
+  "dependencies": {
+    "brc-shared": "workspace:*",
+    "unzipper": "^0.10.14"
+  },
   "engines": {
     "node": ">=22.13"
   }

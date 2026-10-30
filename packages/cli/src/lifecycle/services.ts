@@ -1,14 +1,12 @@
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
-import { open, mkdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { BrcPaths } from './paths.js';
+import type { BrcPaths } from '../config/paths.js';
+import type { BrcSettings } from '../config/settings.js';
+import { LifecycleLock } from './lock.js';
 import {
-  inspectProcess,
   ProcessManager,
   type ManagedServiceSpec,
-  type ProcessIdentity,
   type ServiceStatus,
 } from './processes.js';
 
@@ -17,40 +15,35 @@ export interface ProcessController {
   stop(spec: ManagedServiceSpec): Promise<void>;
   status(spec: ManagedServiceSpec): Promise<ServiceStatus>;
 }
-
-function envErrorCode(error: unknown): string | undefined {
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code;
-  return undefined;
-}
-
 function childEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...parent };
   for (const name of [
     'BRC_DATA_ROOT', 'BRC_HOME', 'BRC_DB', 'BRC_RELAY', 'BRC_NAME', 'BRC_TOKEN', 'BRC_DEVICE_ID', 'BRC_LOG_FILE',
+    'BRC_TRAEFIK_ROOT', 'BRC_TRAEFIK_CONFIG_DIR', 'BRC_TRAEFIK_PORT', 'BRC_TRAEFIK_HEALTH_PORT', 'BRC_RELAY_PORT',
     'BRC_ADMIN_USER', 'BRC_ADMIN_PASSWORD', 'BRC_SESSION_SECRET', 'PORT', 'HOST', 'PUBLIC_URL', 'TRUST_PROXY',
   ]) delete env[name];
   return env;
 }
 
-function relayPort(env: NodeJS.ProcessEnv): number {
-  const port = Number(env.BRC_RELAY_PORT ?? 3000);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('BRC_RELAY_PORT must be an integer from 1 to 65535.');
-  return port;
-}
 
-export function createDefaultServices(paths: BrcPaths, parentEnv: NodeJS.ProcessEnv = process.env): ManagedServiceSpec[] {
-  const cliDist = path.dirname(fileURLToPath(import.meta.url));
+export function createDefaultServices(
+  paths: BrcPaths,
+  settings: Readonly<BrcSettings>,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): ManagedServiceSpec[] {
+  const cliDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const workspaceRoot = path.resolve(cliDist, '../../..');
+  const cliEntry = path.resolve(cliDist, 'cli.js');
   const relayEntry = path.resolve(cliDist, '../../relay/dist/cli.js');
   const agentEntry = path.resolve(cliDist, '../../agent/dist/cli.js');
-  const port = relayPort(parentEnv);
-  const relayUrl = `http://127.0.0.1:${port}`;
+  const { relayPort: relay, proxyPort: proxy, healthPort: health } = settings.services;
+  const proxyUrl = `http://127.0.0.1:${proxy}`;
   const baseEnv = childEnvironment(parentEnv);
   const relayEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
     HOST: '127.0.0.1',
-    PORT: String(port),
-    PUBLIC_URL: relayUrl,
+    PORT: String(relay),
+    PUBLIC_URL: parentEnv.PUBLIC_URL || proxyUrl,
     TRUST_PROXY: 'false',
     BRC_DB: path.join(paths.data, 'relay.sqlite'),
     BRC_LOG_FILE: path.join(paths.logs, 'relay.log'),
@@ -58,28 +51,52 @@ export function createDefaultServices(paths: BrcPaths, parentEnv: NodeJS.Process
     ...(parentEnv.BRC_ADMIN_PASSWORD ? { BRC_ADMIN_PASSWORD: parentEnv.BRC_ADMIN_PASSWORD } : {}),
     ...(parentEnv.BRC_SESSION_SECRET ? { BRC_SESSION_SECRET: parentEnv.BRC_SESSION_SECRET } : {}),
   };
+  const traefikEnv: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    BRC_TRAEFIK_ROOT: paths.traefik,
+    BRC_TRAEFIK_CONFIG_DIR: path.join(paths.traefik, 'config'),
+    BRC_TRAEFIK_PORT: String(proxy),
+    BRC_TRAEFIK_HEALTH_PORT: String(health),
+    BRC_RELAY_PORT: String(relay),
+    BRC_LOG_FILE: path.join(paths.logs, 'traefik.log'),
+  };
   const agentEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
     BRC_HOME: paths.config,
     BRC_LOG_FILE: path.join(paths.logs, 'agent.log'),
-    BRC_RELAY: relayUrl,
+    BRC_RELAY: proxyUrl,
     BRC_NAME: parentEnv.BRC_NAME ?? os.hostname(),
     BRC_DEBUG: parentEnv.BRC_DEBUG,
   };
 
   return [
     { name: 'relay', entrypoint: relayEntry, workspaceRoot, cwd: workspaceRoot, env: relayEnv },
+    { name: 'traefik', entrypoint: cliEntry, args: ['--run-traefik'], workspaceRoot, cwd: workspaceRoot, env: traefikEnv },
     { name: 'agent', entrypoint: agentEntry, workspaceRoot, cwd: workspaceRoot, env: agentEnv },
   ];
 }
 
+export interface LockedServiceOperations {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  restart(): Promise<void>;
+}
+
 export class ServiceManager {
-  private queue: Promise<void> = Promise.resolve();
+  private readonly lockedOperations: LockedServiceOperations = {
+    start: () => this.startUnlocked(),
+    stop: () => this.stopUnlocked(),
+    restart: async () => {
+      await this.stopUnlocked();
+      await this.startUnlocked();
+    },
+  };
 
   constructor(
-    private readonly paths: BrcPaths,
+    paths: BrcPaths,
     private readonly services: ManagedServiceSpec[],
     private readonly processes: ProcessController = new ProcessManager(paths),
+    private readonly lifecycleLock: LifecycleLock = new LifecycleLock(paths),
   ) {
     const names = new Set<ManagedServiceSpec['name']>();
     for (const service of services) {
@@ -89,55 +106,23 @@ export class ServiceManager {
   }
 
   start(): Promise<void> {
-    return this.exclusive(() => this.startUnlocked());
+    return this.withLock((services) => services.start());
   }
 
   stop(): Promise<void> {
-    return this.exclusive(() => this.stopUnlocked());
+    return this.withLock((services) => services.stop());
   }
 
   restart(): Promise<void> {
-    return this.exclusive(async () => {
-      await this.stopUnlocked();
-      await this.startUnlocked();
-    });
+    return this.withLock((services) => services.restart());
+  }
+
+  withLock<T>(operation: (services: LockedServiceOperations) => Promise<T>): Promise<T> {
+    return this.lifecycleLock.runExclusive(() => operation(this.lockedOperations));
   }
 
   status(): Promise<ServiceStatus[]> {
     return Promise.all(this.services.map((service) => this.processes.status(service)));
-  }
-
-  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(() => this.withLifecycleLock(operation));
-    this.queue = result.then(() => undefined, () => undefined);
-    return result;
-  }
-
-  private async withLifecycleLock<T>(operation: () => Promise<T>): Promise<T> {
-    await mkdir(this.paths.runtime, { recursive: true });
-    const filename = path.join(this.paths.runtime, 'lifecycle.lock');
-    let handle;
-    try {
-      handle = await open(filename, 'wx', 0o600);
-    } catch (error) {
-      if (envErrorCode(error) === 'EEXIST') throw new Error('Another BRC lifecycle operation is in progress.');
-      throw error;
-    }
-
-    try {
-      const identity: ProcessIdentity | null = await inspectProcess(process.pid);
-      if (!identity) throw new Error('Cannot verify the CLI process identity for lifecycle locking.');
-      const workspaceRoot = this.services[0]?.workspaceRoot ?? this.paths.root;
-      await handle.writeFile(`${JSON.stringify({ version: 1, ...identity, workspaceRoot, id: randomUUID() })}\n`, 'utf8');
-      return await operation();
-    } finally {
-      await handle.close();
-      try {
-        await unlink(filename);
-      } catch (error) {
-        if (envErrorCode(error) !== 'ENOENT') throw error;
-      }
-    }
   }
 
   private async startUnlocked(): Promise<void> {
