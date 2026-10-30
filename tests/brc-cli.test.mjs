@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { SqliteStore } from '../packages/relay/dist/store/sqlite.js';
 
 const cliEntry = fileURLToPath(new URL('../packages/cli/dist/cli.js', import.meta.url));
 const cliUrl = JSON.stringify(pathToFileURL(cliEntry).href);
@@ -195,6 +196,7 @@ test('automatic cleanup runs after help, invalid commands, and startup failure',
   }
 
   const fixture = await makeCleanupFixture(t);
+  SqliteStore.initialize(path.join(fixture.root, 'data', 'relay.sqlite'));
   const result = runCliProcess(['start'], fixture.root, { BRC_ADMIN_PASSWORD: '', BRC_RELAY_PORT: '13000' });
   assert.notEqual(result.status, 0, result.stderr);
   assert.equal(existsSync(fixture.expiredLog), false);

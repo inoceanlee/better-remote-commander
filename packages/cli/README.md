@@ -38,6 +38,7 @@ pnpm up -g @inoceanlee/brc --latest
 ```
 
 `brc start` 不会自动下载或升级 Traefik。只有 `brc setup` 和 `brc update traefik` 会检查官方稳定版。
+首次 `brc setup` 会在新数据根初始化 Relay 数据库。已有数据根缺少数据库时，`setup` 会拒绝新建；`start` 与 `restart` 也会拒绝启动。Relay 遇到管理员身份缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
 
 ## 数据与卸载
 

@@ -29,6 +29,9 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 - `BRC_ADMIN_USER` / `BRC_ADMIN_PASSWORD` (single-user v1), `BRC_SESSION_SECRET`
 - Agent: `BRC_RELAY`, `BRC_NAME`, `BRC_HOME`, `BRC_DEBUG`; `--logout`, `--no-browser`
 
+## Relay database initialization
+Initialize a new database once with `brc-relay --initialize` or `node packages/relay/dist/cli.js --initialize`. Normal startup refuses a missing database; restore an existing database instead of creating a replacement identity. `brc setup` initializes only a new, empty BRC data root.
+
 ## Agent <-> relay protocol (WebSocket, JSON frames)
 - Agent connects `wss://PUBLIC_URL/ws` with `Authorization: Bearer <device token>`
 - `hello` {deviceId, name, os, version, tools[]}  agent -> relay on connect
@@ -71,6 +74,7 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 
 ### Run locally (Phase 2)
     $env:PORT=3210; $env:PUBLIC_URL='http://localhost:3210'; $env:BRC_ADMIN_PASSWORD='...'; $env:BRC_SESSION_SECRET='...'
+    node packages/relay/dist/cli.js --initialize  # once for a new database
     node packages/relay/dist/cli.js
     node packages/agent/dist/cli.js --relay http://localhost:3210 --name MyPC     # prints pairing code, opens browser
     # Claude: Settings -> Connectors -> add  <PUBLIC_URL>/mcp  -> sign in -> Allow
@@ -84,10 +88,14 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 
 ### Deploy cheat sheet
     cp .env.example .env   # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
+    # Initialize an empty volume once; use relay for local/tunnel or relay-cloud for cloud.
+    docker compose --profile local run --rm --entrypoint node relay dist/cli.js --initialize
+    # docker compose --profile cloud run --rm --entrypoint node relay-cloud dist/cli.js --initialize
+    # Start one profile.
     docker compose --profile local up -d                            # http://localhost:3000
-    docker compose --profile tunnel --profile cloudflare up -d      # + CLOUDFLARE_TUNNEL_TOKEN, PUBLIC_URL=https://rdp.yourdomain
-    docker compose --profile tunnel --profile ngrok up -d           # + NGROK_AUTHTOKEN, NGROK_DOMAIN, PUBLIC_URL=https://<domain>
-    docker compose --profile cloud up -d                            # VPS: DOMAIN=..., PUBLIC_URL=https://DOMAIN
+    # docker compose --profile tunnel --profile cloudflare up -d      # + CLOUDFLARE_TUNNEL_TOKEN, PUBLIC_URL=https://rdp.yourdomain
+    # docker compose --profile tunnel --profile ngrok up -d           # + NGROK_AUTHTOKEN, NGROK_DOMAIN, PUBLIC_URL=https://<domain>
+    # docker compose --profile cloud up -d                            # VPS: DOMAIN=..., PUBLIC_URL=https://DOMAIN
     docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://... -e BRC_NAME=srv brc/agent
 
 ## Phase 4 status (done)

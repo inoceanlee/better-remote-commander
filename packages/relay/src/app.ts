@@ -60,7 +60,7 @@ const DEVICE_POLL_INTERVAL_S = 5;
 export interface Relay { http: HttpServer; hub: DeviceHub; store: SqliteStore; close(): Promise<void> }
 
 export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) => void): Relay {
-  const store = new SqliteStore(cfg.dbFile);
+  const store = SqliteStore.open(cfg.dbFile);
   const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
@@ -80,12 +80,15 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     next();
   });
 
-  const currentUser = (req: Request) => sessions.userId(req);
+  const currentUser = (req: Request) => {
+    const userId = sessions.userId(req);
+    return userId && store.getUser(userId) ? userId : null;
+  };
 
   /* ---------- OAuth ---------- */
   const provider = new RelayOAuthProvider({
     store,
-    currentUserId: (res) => sessions.userId(res.req),
+    currentUserId: (res) => currentUser(res.req),
     renderLogin: (res, returnTo) => res.redirect(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`),
     renderConsent: (res, pendingId, client, scopes) =>
       res.type('html').send(pages.consentPage(pendingId, client.client_name ?? client.client_id, client.redirect_uris?.[0] ?? '', scopes)),
@@ -301,7 +304,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const h = req.headers.authorization;
     const token = h?.startsWith('Bearer ') ? h.slice(7).trim() : url.searchParams.get('token');
     const dev = token ? store.getDeviceByToken(token) : undefined;
-    if (!dev) { log('warn', `agent auth failed from ${req.socket.remoteAddress}`); socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
+    if (!dev || !store.getUser(dev.user_id)) { log('warn', `agent auth failed from ${req.socket.remoteAddress}`); socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
     wss.handleUpgrade(req, socket, head, (ws) => {
       hub.attach(ws, dev.user_id, dev.device_id);
       store.touchDevice(dev.device_id);

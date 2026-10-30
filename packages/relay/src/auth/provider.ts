@@ -67,7 +67,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const pendingId = randomToken(16);
     this.pending.set(pendingId, { client, params, createdAt: Date.now() });
     const userId = this.deps.currentUserId(res);
-    if (!userId) return this.deps.renderLogin(res, `/auth/consent?pending=${pendingId}`);
+    if (!userId || !this.deps.store.getUser(userId)) return this.deps.renderLogin(res, `/auth/consent?pending=${pendingId}`);
     return this.deps.renderConsent(res, pendingId, client, params.scopes ?? SCOPES);
   }
 
@@ -75,6 +75,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   issueCode(pendingId: string, userId: string): string {
     const p = this.pending.get(pendingId);
     if (!p) throw new InvalidRequestError('authorization request expired');
+    if (!this.deps.store.getUser(userId)) throw new InvalidGrantError('invalid user identity');
     this.pending.delete(pendingId);
     const code = randomToken(32);
     this.deps.store.insertAuthCode({
@@ -102,13 +103,13 @@ export class RelayOAuthProvider implements OAuthServerProvider {
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
     const row = this.deps.store.peekAuthCode(authorizationCode);
-    if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid authorization code');
+    if (!row || row.client_id !== client.client_id || !this.deps.store.getUser(row.user_id)) throw new InvalidGrantError('invalid authorization code');
     return row.code_challenge;
   }
 
   async exchangeAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string, _codeVerifier?: string, redirectUri?: string, resource?: URL): Promise<OAuthTokens> {
     const row = this.deps.store.takeAuthCode(authorizationCode);
-    if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid authorization code');
+    if (!row || row.client_id !== client.client_id || !this.deps.store.getUser(row.user_id)) throw new InvalidGrantError('invalid authorization code');
     if (redirectUri && redirectUri !== row.redirect_uri) throw new InvalidGrantError('redirect_uri mismatch');
     const requestedResource = resource?.toString() ?? null;
     if (row.resource && requestedResource && requestedResource !== row.resource) throw new InvalidGrantError('resource mismatch');
@@ -117,7 +118,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
     const row = this.deps.store.getToken(refreshToken, 'refresh');
-    if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid refresh token');
+    if (!row || row.client_id !== client.client_id || !this.deps.store.getUser(row.user_id)) throw new InvalidGrantError('invalid refresh token');
     const requestedResource = resource?.toString() ?? null;
     if (row.resource && requestedResource && requestedResource !== row.resource) throw new InvalidGrantError('resource mismatch');
     this.deps.store.revokeToken(refreshToken);
@@ -129,11 +130,11 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     if (token.startsWith('brc_ak_') || token.startsWith('sesrdp_ak_')) {
       const key = this.deps.store.getApiKey(token);
-      if (!key) throw new InvalidTokenError('invalid or revoked API key');
+      if (!key || !this.deps.store.getUser(key.user_id)) throw new InvalidTokenError('invalid or revoked API key');
       return { token, clientId: `apikey:${key.name}`, scopes: SCOPES, expiresAt: Math.floor(Date.now() / 1000) + 3600, extra: { userId: key.user_id, apiKey: key.prefix } };
     }
     const row = this.deps.store.getToken(token, 'access');
-    if (!row) throw new InvalidTokenError('invalid or expired access token');
+    if (!row || !this.deps.store.getUser(row.user_id)) throw new InvalidTokenError('invalid or expired access token');
     return {
       token, clientId: row.client_id, scopes: row.scopes.split(' '),
       expiresAt: row.expires_at ? Math.floor(row.expires_at / 1000) : undefined,
@@ -148,6 +149,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   private mint(clientId: string, userId: string, scopes: string[], resource: string | null): OAuthTokens {
+    if (!this.deps.store.getUser(userId)) throw new InvalidGrantError('invalid user identity');
     const access = `brc_at_${randomToken(32)}`;
     const refresh = `brc_rt_${randomToken(32)}`;
     const now = Date.now();

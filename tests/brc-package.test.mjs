@@ -248,8 +248,14 @@ console.log(JSON.stringify(services.map(({ name, entrypoint, cwd }) => ({ name, 
     assert.ok(testTraefikBinary, 'Set BRC_TRAEFIK_TEST_BINARY to the official local Traefik v3.7+ executable.');
     const shells = process.env.BRC_PACKAGE_SHELL ? [process.env.BRC_PACKAGE_SHELL] : ['cmd', 'powershell'];
     assert.ok(shells.every((shell) => shell === 'cmd' || shell === 'powershell'), 'BRC_PACKAGE_SHELL must be cmd or powershell.');
+    const relayCli = path.join(repoRoot, 'packages', 'relay', 'dist', 'cli.js');
     for (const shell of shells) {
       await stageTraefikTestBinary(dataRoot);
+      // status above created this root; setup must not fabricate a missing identity here.
+      run(process.execPath, [relayCli, '--initialize'], {
+        cwd: root,
+        env: { ...isolatedEnv, BRC_DB: path.join(dataRoot, 'data', 'relay.sqlite') },
+      });
       run(bin, ['setup'], { cwd: root, env: isolatedEnv });
       await updateAndStopBrc(dataRoot, root, bin, isolatedEnv, updatedPackage);
       const command = shell === 'cmd'

@@ -1,12 +1,24 @@
 // One-shot e2e runner: boots relay + agent on a scratch port/db, auto-pairs, runs all suites, tears down.
 // pnpm test:e2e     (needs `pnpm build` first)
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createServer } from 'node:net';
 
-const PORT = Number(process.env.E2E_PORT ?? 3555);
-const base = `http://localhost:${PORT}`;
+async function availablePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Could not select a loopback port for e2e.');
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+const PORT = Number(process.env.E2E_PORT ?? await availablePort());
+const base = `http://127.0.0.1:${PORT}`;
 const pass = 'e2e-pass-' + Math.random().toString(36).slice(2, 8);
 // realpath: Windows runners hand out 8.3 short paths (RUNNER~1) which crash libuv's fs.watch
 const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'brc-e2e-'));
@@ -31,18 +43,42 @@ async function waitFor(fn, timeoutMs, what) {
 }
 
 function runScript(script, ...args) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const p = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
+    const timeout = setTimeout(() => {
+      p.kill();
+      reject(new Error(`${script} timed out after 30 seconds`));
+    }, 30_000);
     p.stdout.on('data', (d) => { out += d; });
     p.stderr.on('data', (d) => { out += d; });
-    p.on('close', () => resolve(out));
+    p.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    p.once('close', () => { clearTimeout(timeout); resolve(out); });
   });
 }
 
 let failed = 0;
 try {
-  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
+  const relayEnv = {
+    PORT: String(PORT),
+    HOST: '127.0.0.1',
+    PUBLIC_URL: base,
+    BRC_ADMIN_PASSWORD: pass,
+    BRC_SESSION_SECRET: 'e2e',
+    BRC_DB: path.join(scratch, 'relay.sqlite'),
+    BRC_LOG_FILE: path.join(scratch, 'relay.log'),
+    BRC_LOG_ROTATE_MIB: '1',
+    LOG_LEVEL: 'warn',
+  };
+  const initialized = spawnSync(process.execPath, [relayCli, '--initialize'], {
+    env: { ...process.env, ...relayEnv },
+    encoding: 'utf8',
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  if (initialized.error) throw initialized.error;
+  if (initialized.status !== 0) throw new Error(`Relay database initialization failed: ${initialized.stderr.trim() || initialized.stdout.trim()}`);
+  const relay = start('relay', [relayCli], relayEnv);
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
   const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });
@@ -54,6 +90,12 @@ try {
   if (r.status !== 200) throw new Error(`approve failed: ${r.status}`);
   await waitFor(async () => (await (await fetch(`${base}/health`)).json()).devices === 1, 20_000, 'agent online');
   console.log(`relay + agent up on ${base} (pairing code ${code})\n`);
+  relay.kill('SIGTERM');
+  await waitFor(() => relay.exitCode !== null || relay.signalCode !== null, 5000, 'relay shutdown');
+  start('relay', [relayCli], relayEnv);
+  await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay restart');
+  await waitFor(async () => (await (await fetch(`${base}/health`)).json()).devices === 1, 20_000, 'agent reconnect after relay restart');
+  console.log('Agent reconnected after Relay restart with existing database identity.');
 
   // rate-limit test must run last: it locks the admin login for 5 minutes.
   for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-admin.mjs']) {

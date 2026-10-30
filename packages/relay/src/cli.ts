@@ -5,8 +5,20 @@ import { applyLegacyEnv, installManagedLog, startManagedControlServer, type Mana
 applyLegacyEnv();
 const managedLog = installManagedLog();
 import { buildRelay, loadConfig } from './app.js';
+import { SqliteStore } from './store/sqlite.js';
 
 const cfg = loadConfig();
+if (process.argv.includes('--initialize')) {
+  try {
+    SqliteStore.initialize(cfg.dbFile);
+  } catch (error) {
+    console.error(`Relay database initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+    await managedLog?.close();
+    process.exit(1);
+  }
+  await managedLog?.close();
+  process.exit(0);
+}
 if (!cfg.adminPassword) {
   console.error('BRC_ADMIN_PASSWORD is required');
   await managedLog?.close();

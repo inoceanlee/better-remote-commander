@@ -25,19 +25,26 @@ Tools available to the AI (24): `read_file`, `write_file`, `edit_block`, `list_d
 ```bash
 git clone https://github.com/shahidx0x/better-remote-commander.git && cd better-remote-commander
 cp .env.example .env        # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
-docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
-docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
-docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
+# Initialize a new volume before first start; choose one command.
+docker compose --profile local run --rm --entrypoint node relay dist/cli.js --initialize
+# For cloud, use the command below instead.
+# docker compose --profile cloud run --rm --entrypoint node relay-cloud dist/cli.js --initialize
+# Start one profile.
 docker compose --profile local up -d                            # localhost only (testing)
+# docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
+# docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
+# docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
 ```
 Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
+Initialize a new named volume once before its first start; use `relay` for local/tunnel profiles and `relay-cloud` for cloud. Restore an existing database instead of initializing a replacement identity.
 
 **Without Docker**
 ```ash
 npm i -g brc-relay
+brc-relay --initialize
 PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
 ```
-Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.
+Run `brc-relay --initialize` once for a new database. Normal startup refuses a missing database.
 
 ### 2. Agent (on every machine you want to control)
 
@@ -60,8 +67,8 @@ Useful URLs on your relay: `/admin` (devices, audit), `/device/verify` (pairing)
 ## Build from source
 ```bash
 pnpm install && pnpm build && pnpm test
-node packages/relay/dist/cli.js      # relay
-node packages/agent/dist/cli.js      # agent
+node packages/relay/dist/cli.js --initialize  # once for a new database
+node packages/relay/dist/cli.js               # relay
 ```
 Requires Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
 

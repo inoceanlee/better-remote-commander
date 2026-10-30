@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { SqliteStore, verifyPassword, hashPassword } from '../dist/store/sqlite.js';
+import { SqliteStore, sha256, verifyPassword, hashPassword } from '../dist/store/sqlite.js';
+import { RelayOAuthProvider } from '../dist/auth/provider.js';
 import { LoginLimiter } from '../dist/auth/rate-limit.js';
 import { DeviceHub } from '../dist/device-hub.js';
 
@@ -14,7 +15,7 @@ test('password hashing round-trips and rejects wrong password', () => {
 });
 
 test('store: device token issue / lookup / revoke, pairing codes, audit', () => {
-  const s = new SqliteStore(':memory:');
+  const s = SqliteStore.open(':memory:');
   const u = s.upsertUser('admin', 'pw');
   const raw = s.issueDeviceToken('dev1', u.id, 'PC', 'win32');
   assert.equal(s.getDeviceByToken(raw)?.device_id, 'dev1');
@@ -38,11 +39,12 @@ test('store: device token issue / lookup / revoke, pairing codes, audit', () => 
 });
 
 test('store: tokens expire and revoke', () => {
-  const s = new SqliteStore(':memory:');
+  const s = SqliteStore.open(':memory:');
   const now = Date.now();
   const h = (t) => createHash('sha256').update(t).digest('hex');
-  s.insertToken({ token_hash: h('t1'), kind: 'access', client_id: 'c', user_id: 'u', scopes: 'mcp:tools', resource: null, expires_at: now + 1000, created_at: now, revoked: 0 });
-  s.insertToken({ token_hash: h('t2'), kind: 'access', client_id: 'c', user_id: 'u', scopes: 'mcp:tools', resource: null, expires_at: now - 1, created_at: now, revoked: 0 });
+  const user = s.upsertUser('admin', 'pw');
+  s.insertToken({ token_hash: h('t1'), kind: 'access', client_id: 'c', user_id: user.id, scopes: 'mcp:tools', resource: null, expires_at: now + 1000, created_at: now, revoked: 0 });
+  s.insertToken({ token_hash: h('t2'), kind: 'access', client_id: 'c', user_id: user.id, scopes: 'mcp:tools', resource: null, expires_at: now - 1, created_at: now, revoked: 0 });
   assert.ok(s.getToken('t1', 'access'));
   assert.equal(s.getToken('t2', 'access'), undefined, 'expired');
   assert.equal(s.getToken('t1', 'refresh'), undefined, 'kind mismatch');
@@ -50,6 +52,59 @@ test('store: tokens expire and revoke', () => {
   assert.equal(s.getToken('t1', 'access'), undefined, 'revoked');
   s.close();
 });
+test('store preserves administrator id and password hash when password is unchanged', () => {
+  const s = SqliteStore.open(':memory:');
+  try {
+    const first = s.upsertUser('admin', 'pw');
+    const second = s.upsertUser('admin', 'pw');
+    assert.equal(second.id, first.id);
+    assert.equal(second.password_hash, first.password_hash);
+    const changed = s.upsertUser('admin', 'new-pw');
+    assert.equal(changed.id, first.id);
+    assert.notEqual(changed.password_hash, first.password_hash);
+    assert.ok(verifyPassword('new-pw', changed.password_hash));
+  } finally {
+    s.close();
+  }
+});
+
+test('OAuth rejects authorization codes, access tokens, refresh tokens, and API keys with missing owners', async () => {
+  const s = SqliteStore.open(':memory:');
+  try {
+    s.upsertUser('admin', 'pw');
+    s.db.exec('PRAGMA foreign_keys = OFF');
+    const now = Date.now();
+    const code = (value) => ({
+      code: value, client_id: 'client', user_id: 'missing-user', code_challenge: 'challenge',
+      redirect_uri: 'https://client.invalid/callback', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000,
+    });
+    s.insertAuthCode(code('stale-challenge'));
+    s.insertAuthCode(code('stale-exchange'));
+    s.insertToken({ token_hash: sha256('stale-access'), kind: 'access', client_id: 'client', user_id: 'missing-user', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000, created_at: now, revoked: 0 });
+    s.insertToken({ token_hash: sha256('stale-refresh'), kind: 'refresh', client_id: 'client', user_id: 'missing-user', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000, created_at: now, revoked: 0 });
+    const apiKey = s.createApiKey('missing-user', 'stale key');
+    s.db.exec('PRAGMA foreign_keys = ON');
+    const provider = new RelayOAuthProvider({
+      store: s,
+      currentUserId: () => null,
+      renderLogin: () => {},
+      renderConsent: () => {},
+      issuer: 'https://relay.invalid',
+    });
+    const client = { client_id: 'client' };
+    const outcomes = await Promise.allSettled([
+      provider.challengeForAuthorizationCode(client, 'stale-challenge'),
+      provider.exchangeAuthorizationCode(client, 'stale-exchange'),
+      provider.exchangeRefreshToken(client, 'stale-refresh'),
+      provider.verifyAccessToken('stale-access'),
+      provider.verifyAccessToken(apiKey.raw),
+    ]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.status), ['rejected', 'rejected', 'rejected', 'rejected', 'rejected']);
+  } finally {
+    s.close();
+  }
+});
+
 
 test('login limiter locks after N failures and clears on success', () => {
   const l = new LoginLimiter(3, 60_000);

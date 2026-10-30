@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { realpathSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runConfigCommand } from './commands/config.js';
 import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
@@ -13,6 +14,7 @@ import { cleanRuntime } from './maintenance/cleanup.js';
 import { createMaintenanceCommands } from './commands/maintenance.js';
 import { TraefikManager } from './traefik/manager.js';
 import { runManagedTraefikService } from './traefik/runtime.js';
+import { RelayDatabase } from './lifecycle/relay-database.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -186,6 +188,7 @@ function traefikSettingsChanged(previous: Readonly<BrcSettings>, next: Readonly<
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
+  const rootWasEmpty = !existsSync(paths.root) || readdirSync(paths.root).length === 0;
   const lifecycleLock = new LifecycleLock(paths);
   let configTraefikManager: TraefikManager | undefined;
   const settingsManager = await SettingsManager.load(paths, process.env, {
@@ -208,6 +211,9 @@ async function main(): Promise<void> {
     return createDefaultServices(paths, currentSettings);
   };
   const services = createDefaultServices(paths, settings);
+  const relaySpec = services.find((service) => service.name === 'relay');
+  if (!relaySpec) throw new Error('The Relay service is missing from the default service set.');
+  const relayDatabase = new RelayDatabase(path.join(paths.data, 'relay.sqlite'), relaySpec);
   const traefikSpec = services.find((service) => service.name === 'traefik');
   if (!traefikSpec) throw new Error('The Traefik service is missing from the default service set.');
   const serviceManager = new ServiceManager(paths, services, processes, lifecycleLock, refreshServices);
@@ -230,10 +236,12 @@ async function main(): Promise<void> {
     commands: {
       setup: async () => {
         await settingsManager.ensureConfigFile();
+        relayDatabase.initializeForNewRoot(rootWasEmpty);
         await traefikManager.setup();
         return 0;
       },
       start: async () => {
+        relayDatabase.assertExists();
         await serviceManager.withLock(async (operations) => {
           const statuses = await serviceManager.status();
           const hasRunning = statuses.some((status) => status.state === 'running');
@@ -255,6 +263,7 @@ async function main(): Promise<void> {
         return 0;
       },
       restart: async () => {
+        relayDatabase.assertExists();
         await serviceManager.withLock(async (operations) => {
           await operations.stop();
           await traefikManager.writeConfigWithLockHeld(await loadSettings());

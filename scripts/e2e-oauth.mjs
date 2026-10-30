@@ -49,8 +49,8 @@ step('token', !!tok.access_token && !!tok.refresh_token, `expires_in=${tok.expir
 
 // 7. MCP: initialize, tools/list, tools/call
 const H = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${tok.access_token}` };
-const rpc = async (method, params, id) => {
-  const res = await fetch(`${base}/mcp`, { method: 'POST', headers: H, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
+const rpc = async (method, params, id, headers = H) => {
+  const res = await fetch(`${base}/mcp`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
   const ct = res.headers.get('content-type') ?? '';
   const text = await res.text();
   if (ct.includes('text/event-stream')) { const m = text.match(/^data: (.+)$/m); return { status: res.status, body: m ? JSON.parse(m[1]) : null }; }
@@ -70,6 +70,24 @@ step('mcp list_devices', devJson.devices?.some((d) => d.online), JSON.stringify(
 const call = await rpc('tools/call', { name: 'start_process', arguments: { command: 'echo brc-mcp-ok', timeout_ms: 8000 } }, 4);
 const out = call.body?.result?.content?.[0]?.text ?? '';
 step('mcp start_process via device', out.includes('brc-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
+const redirect2 = 'https://claude.ai/api/mcp/auth_callback';
+const reg2 = await j(await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ client_name: 'Second BRC client', redirect_uris: [redirect2], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }) }));
+const verifier2 = b64(randomBytes(32));
+const challenge2 = b64(createHash('sha256').update(verifier2).digest());
+const authUrl2 = `${meta.authorization_endpoint}?response_type=code&client_id=${reg2.client_id}&redirect_uri=${encodeURIComponent(redirect2)}&code_challenge=${challenge2}&code_challenge_method=S256&scope=mcp:tools&resource=${encodeURIComponent(prm.resource)}`;
+const consent2 = await fetch(authUrl2, { headers: { cookie } });
+const html2 = await consent2.text();
+const pending2 = html2.match(/name="pending" value="([^"]+)"/)?.[1];
+const allowed2 = await fetch(`${base}/auth/consent`, { method: 'POST', redirect: 'manual', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ pending: pending2, decision: 'allow' }) });
+const code2 = new URL(allowed2.headers.get('location')).searchParams.get('code');
+const tok2 = await j(await fetch(meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ grant_type: 'authorization_code', code: code2, code_verifier: verifier2, client_id: reg2.client_id, redirect_uri: redirect2, resource: prm.resource }) }));
+const devs2 = await rpc('tools/call', { name: 'list_devices', arguments: {} }, 5, { ...H, authorization: `Bearer ${tok2.access_token}` });
+const devices2 = JSON.parse(devs2.body?.result?.content?.[0]?.text ?? '{}').devices ?? [];
+const stableDevices = (devices) => devices.map(({ deviceId, name, platform, online, paused }) => ({ deviceId, name, platform, online, paused })).sort((a, b) => a.deviceId.localeCompare(b.deviceId));
+step('second OAuth client sees same devices', consent2.status === 200 && !!tok2.access_token && JSON.stringify(stableDevices(devices2)) === JSON.stringify(stableDevices(devJson.devices)), JSON.stringify(devices2.map((device) => device.name)));
 
 // 8. unauthorized / refresh
 const bad = await fetch(`${base}/mcp`, { method: 'POST', headers: { ...H, authorization: 'Bearer nope' }, body: '{}' });

@@ -12,8 +12,11 @@ Doors it exposes:
 
 ```bash
 npm i -g brc-relay
+brc-relay --initialize
 PUBLIC_URL=https://brc.example.com BRC_ADMIN_PASSWORD=change-me BRC_SESSION_SECRET=random-string TRUST_PROXY=true brc-relay
 ```
+
+Run `brc-relay --initialize` once for a new database. Normal startup refuses a missing database; restore an existing database instead of initializing a replacement identity.
 Put it behind any HTTPS reverse proxy or tunnel that forwards WebSockets (Caddy, nginx, Cloudflare Tunnel, ngrok).
 Docker Compose profiles for VPS / Cloudflare Tunnel / ngrok are in the repository.
 
