@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { applyLegacyEnv, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
+import { applyLegacyEnv, installManagedLog, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 applyLegacyEnv();
+const managedLog = installManagedLog();
 import { buildRelay, loadConfig } from './app.js';
 
 const cfg = loadConfig();
-if (!cfg.adminPassword) { console.error('BRC_ADMIN_PASSWORD is required'); process.exit(2); }
+if (!cfg.adminPassword) {
+  console.error('BRC_ADMIN_PASSWORD is required');
+  await managedLog?.close();
+  process.exit(2);
+}
 if (!cfg.sessionSecret) {
   cfg.sessionSecret = randomBytes(32).toString('hex');
   console.warn('BRC_SESSION_SECRET not set: using a random secret (browser sessions reset on restart)');
@@ -32,6 +37,7 @@ const stop = async (sig?: string) => {
   if (sig) log('info', `${sig} received, shutting down`);
   await control?.close();
   await relay.close();
+  await managedLog?.close();
 };
 process.on('SIGINT', () => { void stop('SIGINT').catch((error: unknown) => log('error', String(error))); });
 process.on('SIGTERM', () => { void stop('SIGTERM').catch((error: unknown) => log('error', String(error))); });

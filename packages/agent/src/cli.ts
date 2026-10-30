@@ -7,8 +7,9 @@
  * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG
  */
 import os from 'node:os';
-import { applyLegacyEnv, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
+import { applyLegacyEnv, installManagedLog, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 applyLegacyEnv();
+const managedLog = installManagedLog();
 import { WsClient } from './transport/ws-client.js';
 import { pairDevice, loadCredentials, clearCredentials, saveCredentials, type DeviceCredentials } from './transport/pairing.js';
 import { callTool, listTools } from './dispatcher.js';
@@ -24,6 +25,11 @@ function arg(name: string, env?: string, def?: string): string | undefined {
 }
 const flag = (name: string) => process.argv.includes(`--${name}`);
 
+async function exitWithCode(code: number): Promise<never> {
+  await managedLog?.close();
+  process.exit(code);
+}
+
 const debug = flag('debug') || process.env.BRC_DEBUG === '1';
 const ts = () => new Date().toISOString();
 const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => {
@@ -33,13 +39,13 @@ const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => {
 
 if (flag('logout')) {
   console.log(clearCredentials() ? 'Credentials removed.' : 'No saved credentials.');
-  process.exit(0);
+  await exitWithCode(0);
 }
 if (flag('install-service') || flag('uninstall-service')) {
   const { installService, uninstallService } = await import('./service.js');
   try {
-    if (flag('uninstall-service')) { console.log(uninstallService()); process.exit(0); }
-    if (!loadCredentials()) { console.error('Pair first: run the agent once interactively with --relay <url>, then --install-service.'); process.exit(2); }
+    if (flag('uninstall-service')) { console.log(uninstallService()); await exitWithCode(0); }
+    if (!loadCredentials()) { console.error('Pair first: run the agent once interactively with --relay <url>, then --install-service.'); await exitWithCode(2); }
     // Service uses saved credentials; only pass through policy/debug flags.
     const keep = new Set(['--debug', '--allow-dir']);
     const passthrough: string[] = [];
@@ -50,8 +56,8 @@ if (flag('install-service') || flag('uninstall-service')) {
       if (argv[i] === '--allow-dir' && argv[i + 1]) passthrough.push(argv[++i]);
     }
     console.log(installService(passthrough));
-  } catch (e) { console.error(`Service setup failed: ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
-  process.exit(0);
+  } catch (e) { console.error(`Service setup failed: ${e instanceof Error ? e.message : String(e)}`); await exitWithCode(1); }
+  await exitWithCode(0);
 }
 
 // --allow-dir <path> (repeatable): restrict tools to these directories (agent-side policy, persisted in config)
@@ -69,7 +75,7 @@ async function resolveCredentials(): Promise<DeviceCredentials> {
   const deviceId = arg('device-id', 'BRC_DEVICE_ID');
 
   if (token) {
-    if (!relayArg || !deviceId) { console.error('--token requires --relay and --device-id'); process.exit(2); }
+    if (!relayArg || !deviceId) { console.error('--token requires --relay and --device-id'); return await exitWithCode(2); }
     return { relayUrl: relayArg.replace(/\/$/, ''), deviceId, deviceToken: token, name, pairedAt: 'manual' };
   }
 
@@ -80,7 +86,7 @@ async function resolveCredentials(): Promise<DeviceCredentials> {
   }
   if (!relayArg) {
     console.error('No saved credentials. Usage: brc-agent --relay <url> [--name <name>]');
-    process.exit(2);
+    return await exitWithCode(2);
   }
   return pairDevice({ relayUrl: relayArg, name, deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
 }
@@ -117,7 +123,12 @@ const shutdown = async (sig?: string) => {
   if (sig) console.log(`\n${sig} received, stopping agent`);
   client.stop();
   await control?.close();
-  setTimeout(() => process.exit(0), 200);
+  setTimeout(() => {
+    void (managedLog?.close() ?? Promise.resolve()).then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
+  }, 200);
 };
 process.on('SIGINT', () => { void shutdown('SIGINT'); });
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });

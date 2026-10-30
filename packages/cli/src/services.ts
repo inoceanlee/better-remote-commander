@@ -26,7 +26,7 @@ function envErrorCode(error: unknown): string | undefined {
 function childEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...parent };
   for (const name of [
-    'BRC_DATA_ROOT', 'BRC_HOME', 'BRC_DB', 'BRC_RELAY', 'BRC_NAME', 'BRC_TOKEN', 'BRC_DEVICE_ID',
+    'BRC_DATA_ROOT', 'BRC_HOME', 'BRC_DB', 'BRC_RELAY', 'BRC_NAME', 'BRC_TOKEN', 'BRC_DEVICE_ID', 'BRC_LOG_FILE',
     'BRC_ADMIN_USER', 'BRC_ADMIN_PASSWORD', 'BRC_SESSION_SECRET', 'PORT', 'HOST', 'PUBLIC_URL', 'TRUST_PROXY',
   ]) delete env[name];
   return env;
@@ -53,6 +53,7 @@ export function createDefaultServices(paths: BrcPaths, parentEnv: NodeJS.Process
     PUBLIC_URL: relayUrl,
     TRUST_PROXY: 'false',
     BRC_DB: path.join(paths.data, 'relay.sqlite'),
+    BRC_LOG_FILE: path.join(paths.logs, 'relay.log'),
     BRC_ADMIN_USER: parentEnv.BRC_ADMIN_USER ?? 'admin',
     ...(parentEnv.BRC_ADMIN_PASSWORD ? { BRC_ADMIN_PASSWORD: parentEnv.BRC_ADMIN_PASSWORD } : {}),
     ...(parentEnv.BRC_SESSION_SECRET ? { BRC_SESSION_SECRET: parentEnv.BRC_SESSION_SECRET } : {}),
@@ -60,6 +61,7 @@ export function createDefaultServices(paths: BrcPaths, parentEnv: NodeJS.Process
   const agentEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
     BRC_HOME: paths.config,
+    BRC_LOG_FILE: path.join(paths.logs, 'agent.log'),
     BRC_RELAY: relayUrl,
     BRC_NAME: parentEnv.BRC_NAME ?? os.hostname(),
     BRC_DEBUG: parentEnv.BRC_DEBUG,

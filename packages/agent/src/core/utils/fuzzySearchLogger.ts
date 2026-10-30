@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { appendRotatingLog } from 'brc-shared';
 
 export interface FuzzySearchLogEntry {
     timestamp: Date;
@@ -20,6 +21,25 @@ export interface FuzzySearchLogEntry {
     uniqueCharacterCount: number;
     diffLength: number;
 }
+
+const FUZZY_LOG_HEADERS = [
+    'timestamp',
+    'searchText',
+    'foundText',
+    'similarity',
+    'executionTime',
+    'exactMatchCount',
+    'expectedReplacements',
+    'fuzzyThreshold',
+    'belowThreshold',
+    'diff',
+    'searchLength',
+    'foundLength',
+    'fileExtension',
+    'characterCodes',
+    'uniqueCharacterCount',
+    'diffLength'
+].join('\t');
 
 class FuzzySearchLogger {
     private logPath: string;
@@ -44,24 +64,7 @@ class FuzzySearchLogger {
                 await fs.access(this.logPath);
             } catch {
                 // File doesn't exist, create with headers
-                const headers = [
-                    'timestamp',
-                    'searchText',
-                    'foundText',
-                    'similarity',
-                    'executionTime',
-                    'exactMatchCount',
-                    'expectedReplacements',
-                    'fuzzyThreshold',
-                    'belowThreshold',
-                    'diff',
-                    'searchLength',
-                    'foundLength',
-                    'fileExtension',
-                    'characterCodes',
-                    'uniqueCharacterCount',
-                    'diffLength'
-                ].join('\t');
+                const headers = FUZZY_LOG_HEADERS;
                 await fs.writeFile(this.logPath, headers + '\n');
             }
             
@@ -96,7 +99,7 @@ class FuzzySearchLogger {
                 entry.diffLength.toString()
             ].join('\t');
             
-            await fs.appendFile(this.logPath, logLine + '\n');
+            await appendRotatingLog(this.logPath, logLine + '\n');
         } catch (error) {
             console.error('Failed to write to fuzzy search log:', error);
         }
@@ -111,10 +114,9 @@ class FuzzySearchLogger {
         try {
             await this.ensureLogFile();
             const content = await fs.readFile(this.logPath, 'utf-8');
-            const lines = content.split('\n').filter(line => line.trim());
-            
-            // Return last N lines (excluding header)
-            return lines.slice(-count - 1, -1);
+            const lines = content.split('\n').filter(line => line.trim() && line !== FUZZY_LOG_HEADERS);
+            const limit = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+            return limit === 0 ? [] : lines.slice(-limit);
         } catch (error) {
             console.error('Failed to read fuzzy search logs:', error);
             return [];
@@ -124,25 +126,9 @@ class FuzzySearchLogger {
     async clearLog(): Promise<void> {
         try {
             // Recreate with just headers
-            const headers = [
-                'timestamp',
-                'searchText',
-                'foundText',
-                'similarity',
-                'executionTime',
-                'exactMatchCount',
-                'expectedReplacements',
-                'fuzzyThreshold',
-                'belowThreshold',
-                'diff',
-                'searchLength',
-                'foundLength',
-                'fileExtension',
-                'characterCodes',
-                'uniqueCharacterCount',
-                'diffLength'
-            ].join('\t');
+            const headers = FUZZY_LOG_HEADERS;
             
+            await fs.rm(`${this.logPath}.1`, { force: true });
             await fs.writeFile(this.logPath, headers + '\n');
             console.log('Fuzzy search log cleared');
         } catch (error) {

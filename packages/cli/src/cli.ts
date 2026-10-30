@@ -2,6 +2,7 @@
 import { pathToFileURL } from 'node:url';
 import { resolveBrcPaths, type BrcPaths } from './paths.js';
 import { createDefaultServices, ServiceManager } from './services.js';
+import { cleanRuntime } from './cleanup.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -187,7 +188,14 @@ async function main(): Promise<void> {
       updateTraefik: unavailable,
       uninstall: unavailable,
     },
-    clean: async () => {},
+    clean: async (cleanPaths) => {
+      const report = await cleanRuntime(cleanPaths);
+      if (report.removed || report.failures.length || report.preserved.length) {
+        console.log(`BRC cleanup: removed ${report.removed} items, freed ${report.bytesRemoved} bytes.`);
+        for (const failure of report.failures) console.error(`BRC cleanup failed: ${failure.path}: ${failure.reason}`);
+        for (const preserved of report.preserved) console.error(`BRC cleanup preserved ${preserved.path}: ${preserved.reason}`);
+      }
+    },
     write: (message) => console.log(message),
     writeError: (message) => console.error(message),
   };

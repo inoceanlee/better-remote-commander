@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,12 +12,24 @@ const cliUrl = JSON.stringify(pathToFileURL(cliEntry).href);
 const pathsEntry = fileURLToPath(new URL('../packages/cli/dist/paths.js', import.meta.url));
 const pathsUrl = JSON.stringify(pathToFileURL(pathsEntry).href);
 
-function runCliProcess(args) {
+function runCliProcess(args, dataRoot = path.join(os.tmpdir(), 'brc-cli-process-test'), extraEnv = {}) {
   return spawnSync(process.execPath, [cliEntry, ...args], {
     encoding: 'utf8',
     windowsHide: true,
-    env: { ...process.env, BRC_DATA_ROOT: path.join(os.tmpdir(), 'brc-cli-process-test') },
+    env: { ...process.env, ...extraEnv, BRC_DATA_ROOT: dataRoot },
   });
+}
+
+async function makeCleanupFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-clean-'));
+  const logs = path.join(root, 'logs');
+  await mkdir(logs, { recursive: true });
+  const expiredLog = path.join(logs, 'expired.log');
+  await writeFile(expiredLog, 'expired');
+  const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  await utimes(expiredLog, old, old);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return { root, expiredLog };
 }
 
 function runProbe(body) {
@@ -95,6 +109,30 @@ console.log(JSON.stringify({ exitCode, cleanCount }));
   assert.deepEqual(result, { exitCode: 0, cleanCount: 1 });
 });
 
+test('brc clean removes expired files and reports the cleanup result', async (t) => {
+  const fixture = await makeCleanupFixture(t);
+  const result = runCliProcess(['clean'], fixture.root);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(fixture.expiredLog), false);
+  assert.match(result.stdout, /BRC cleanup: removed 1 items/);
+});
+
+test('automatic cleanup runs after help, invalid commands, and startup failure', async (t) => {
+  for (const args of [['help'], ['unknown']]) {
+    const fixture = await makeCleanupFixture(t);
+    const result = runCliProcess(args, fixture.root);
+    assert.equal(result.status, args[0] === 'help' ? 0 : 2, result.stderr);
+    assert.equal(existsSync(fixture.expiredLog), false);
+  }
+
+  const fixture = await makeCleanupFixture(t);
+  const result = runCliProcess(['start'], fixture.root, { BRC_ADMIN_PASSWORD: '', BRC_RELAY_PORT: '13000' });
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.equal(existsSync(fixture.expiredLog), false);
+  const relayLog = await readFile(path.join(fixture.root, 'logs', 'relay.log'), 'utf8');
+  assert.match(relayLog, /BRC_ADMIN_PASSWORD is required/);
+});
 test('data-root override resolves isolated paths without using Agent BRC_HOME', () => {
   const override = path.join(os.tmpdir(), 'isolated-brc');
   const result = probeResult(runProbe(`
