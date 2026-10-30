@@ -19,7 +19,7 @@ function isWithin(root: string, filename: string): boolean {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-async function verifyLogDirectory(paths: BrcPaths): Promise<void> {
+async function verifyLogDirectory(paths: BrcPaths): Promise<boolean> {
   const root = path.resolve(paths.root);
   const logs = path.resolve(paths.logs);
   if (!isWithin(root, logs)) throw new Error('Log directory is outside the BRC data root.');
@@ -27,11 +27,18 @@ async function verifyLogDirectory(paths: BrcPaths): Promise<void> {
   let current = root;
   for (const segment of ['', ...path.relative(root, logs).split(path.sep)]) {
     if (segment) current = path.join(current, segment);
-    const info = await lstat(current);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return false;
+      throw error;
+    }
     if (info.isSymbolicLink() || !info.isDirectory()) {
       throw new Error('Log directory path contains a link or non-directory entry.');
     }
   }
+  return true;
 }
 
 async function readTail(filename: string): Promise<Buffer | null> {
@@ -86,10 +93,15 @@ export async function showLogs(
   write: (message: string) => void,
   writeError: (message: string) => void,
 ): Promise<number> {
+  let logDirectoryExists: boolean;
   try {
-    await verifyLogDirectory(paths);
+    logDirectoryExists = await verifyLogDirectory(paths);
   } catch (error) {
     writeError(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+  if (!logDirectoryExists) {
+    writeError(component ? `${component} log not found.` : 'No service logs were found.');
     return 1;
   }
 

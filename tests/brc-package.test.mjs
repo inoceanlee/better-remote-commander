@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -76,6 +76,28 @@ test('single package tarball is complete, self-contained, and globally installab
     const cliMode = (await stat(path.join(extractedPackage, 'dist/cli.js'))).mode;
     assert.notEqual(cliMode & 0o111, 0, 'CLI bin must retain executable permissions');
   }
+  const servicesUrl = pathToFileURL(path.join(extractedPackage, 'dist', 'lifecycle', 'services.js')).href;
+  const settingsUrl = pathToFileURL(path.join(extractedPackage, 'dist', 'config', 'settings.js')).href;
+  const dataRoot = path.join(root, 'brc-data');
+  const serviceEntries = JSON.parse(run(process.execPath, [
+    '--input-type=module',
+    '-e',
+    `
+import { createDefaultServices } from ${JSON.stringify(servicesUrl)};
+import { DEFAULT_SETTINGS } from ${JSON.stringify(settingsUrl)};
+import path from 'node:path';
+const root = ${JSON.stringify(dataRoot)};
+const paths = Object.fromEntries(['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'].map((name) => [name, path.join(root, name)]));
+const services = createDefaultServices(paths, DEFAULT_SETTINGS, {});
+console.log(JSON.stringify(services.map(({ name, entrypoint, cwd }) => ({ name, entrypoint, cwd }))));
+`,
+  ], { cwd: root }));
+  assert.deepEqual(serviceEntries, [
+    { name: 'relay', entrypoint: path.join(extractedPackage, 'dist', 'services', 'relay', 'cli.js'), cwd: extractedPackage },
+    { name: 'traefik', entrypoint: path.join(extractedPackage, 'dist', 'cli.js'), cwd: extractedPackage },
+    { name: 'agent', entrypoint: path.join(extractedPackage, 'dist', 'services', 'agent', 'cli.js'), cwd: extractedPackage },
+  ]);
+
 
   const isolatedHome = path.join(root, 'pnpm-home');
   const isolatedStore = path.join(root, 'pnpm-store');

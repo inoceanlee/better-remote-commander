@@ -78,6 +78,21 @@ console.log(JSON.stringify({ exitCode, errors }));
   assert.match(result.errors.join('\n'), /agent.*log.*not found/i);
 });
 
+test('reports no service logs when data root does not exist', async (t) => {
+  const fixture = await makeFixture(t);
+  await rm(fixture.root, { recursive: true, force: true });
+  const result = parseResult(await runProbe(`
+const output = [];
+const errors = [];
+const exitCode = await showLogs(${JSON.stringify(fixture.paths)}, undefined, (value) => output.push(value), (value) => errors.push(value));
+console.log(JSON.stringify({ exitCode, output, errors }));
+`));
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.output, []);
+  assert.match(result.errors.join('\n'), /no service logs were found/i);
+});
+
 test('bounds output to the newest log bytes', async (t) => {
   const fixture = await makeFixture(t);
   await writeFile(path.join(fixture.logs, 'relay.log'), `${'x'.repeat(70 * 1024)}\nLATEST\n`);

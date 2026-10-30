@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,10 +33,13 @@ export function createDefaultServices(
   parentEnv: NodeJS.ProcessEnv = process.env,
 ): ManagedServiceSpec[] {
   const cliDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const workspaceRoot = path.resolve(cliDist, '../../..');
+  const packedRelayEntry = path.resolve(cliDist, 'services/relay/cli.js');
+  const packedAgentEntry = path.resolve(cliDist, 'services/agent/cli.js');
+  const isStandalonePackage = existsSync(packedRelayEntry) && existsSync(packedAgentEntry);
+  const workspaceRoot = isStandalonePackage ? path.resolve(cliDist, '..') : path.resolve(cliDist, '../../..');
   const cliEntry = path.resolve(cliDist, 'cli.js');
-  const relayEntry = path.resolve(cliDist, '../../relay/dist/cli.js');
-  const agentEntry = path.resolve(cliDist, '../../agent/dist/cli.js');
+  const relayEntry = isStandalonePackage ? packedRelayEntry : path.resolve(cliDist, '../../relay/dist/cli.js');
+  const agentEntry = isStandalonePackage ? packedAgentEntry : path.resolve(cliDist, '../../agent/dist/cli.js');
   const { relayPort: relay, proxyPort: proxy, healthPort: health } = settings.services;
   const proxyUrl = `http://127.0.0.1:${proxy}`;
   const baseEnv = childEnvironment(parentEnv);
