@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS } from './config/settings.js';
 import { LifecycleLock } from './lifecycle/lock.js';
 import { createDefaultServices, ServiceManager } from './lifecycle/services.js';
 import { cleanRuntime } from './maintenance/cleanup.js';
+import { createMaintenanceCommands } from './commands/maintenance.js';
 import { runManagedTraefikService, TraefikManager } from './traefik.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
@@ -165,6 +166,11 @@ async function main(): Promise<void> {
   const lifecycleLock = new LifecycleLock(paths);
   const serviceManager = new ServiceManager(paths, services, undefined, lifecycleLock);
   const traefikServiceManager = new ServiceManager(paths, [traefikSpec], undefined, lifecycleLock);
+  const maintenanceCommands = createMaintenanceCommands(
+    paths,
+    (message) => console.log(message),
+    (message) => console.error(message),
+  );
   const traefikManager = new TraefikManager(paths);
   const deps: CliDependencies = {
     paths,
@@ -197,7 +203,7 @@ async function main(): Promise<void> {
         }
         return statuses.some((status) => status.state === 'degraded') ? 1 : 0;
       },
-      logs: unavailable,
+      logs: maintenanceCommands.logs,
       updateTraefik: async () => {
         const [status] = await traefikServiceManager.status();
         if (status.state !== 'running' && status.state !== 'stopped') {
