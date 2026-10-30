@@ -135,8 +135,6 @@ importers:
         specifier: ^8.5.12
         version: 8.18.1
 
-  packages/cli: {}
-
   packages/relay:
     dependencies:
       "@modelcontextprotocol/sdk":
@@ -173,6 +171,9 @@ importers:
       brc-shared:
         specifier: workspace:*
         version: link:../shared
+      js-yaml:
+        specifier: ^3.15.2
+        version: 3.15.2
       unzipper:
         specifier: ^0.10.14
         version: 0.10.14

@@ -6,7 +6,7 @@ import { mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/pr
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { BrcPaths } from '../config/paths.js';
-import { DEFAULT_SETTINGS } from '../config/settings.js';
+import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
 
 export type ManagedServiceName = 'relay' | 'traefik' | 'agent';
 export type ServiceState = 'stopped' | 'starting' | 'running' | 'degraded';
@@ -247,8 +247,8 @@ export async function inspectProcess(pid: number): Promise<ProcessIdentity | nul
 }
 
 export class ProcessManager {
-  private readonly startupTimeoutMs: number;
-  private readonly shutdownTimeoutMs: number;
+  private startupTimeoutMs: number;
+  private shutdownTimeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly inspect: ProcessInspector;
   private readonly starting = new Map<ManagedServiceName, number | null>();
@@ -258,6 +258,10 @@ export class ProcessManager {
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SETTINGS.runtime.shutdownTimeoutMs;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.inspect = options.inspectProcess ?? inspectProcess;
+  }
+  updateRuntimeSettings(settings: Readonly<Pick<BrcSettings['runtime'], 'startupTimeoutMs' | 'shutdownTimeoutMs'>>): void {
+    this.startupTimeoutMs = settings.startupTimeoutMs;
+    this.shutdownTimeoutMs = settings.shutdownTimeoutMs;
   }
 
   async start(spec: ManagedServiceSpec): Promise<void> {

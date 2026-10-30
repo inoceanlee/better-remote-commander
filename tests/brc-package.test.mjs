@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,9 +10,12 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const packer = path.join(repoRoot, 'scripts', 'pack-brc.mjs');
 const requiredFiles = [
   'package/package.json',
+  'package/README.md',
+  'package/LICENSE',
   'package/dist/cli.js',
   'package/dist/services/relay/cli.js',
   'package/dist/services/agent/cli.js',
+  'package/dist/maintenance/uninstall-worker.js',
   'package/deploy/traefik/traefik.yml',
   'package/deploy/traefik/dynamic.yml',
   'package/node_modules/brc-shared/package.json',
@@ -27,11 +30,19 @@ const forbiddenFiles = [
   /(^|\/)node_modules\/\.pnpm(?:\/|$)/,
 ];
 
+
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const isWindowsShim = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
+  const cmdLine = [`"${command.replaceAll('"', '""')}"`, ...args.map((arg) => `"${arg.replaceAll('"', '""')}"`)].join(' ');
+  const executable = isWindowsShim ? process.env.ComSpec || 'cmd.exe' : command;
+  const spawnArgs = isWindowsShim ? ['/d', '/s', '/c', `"${cmdLine}"`] : args;
+  const result = spawnSync(executable, spawnArgs, {
     cwd: repoRoot,
     encoding: 'utf8',
     windowsHide: true,
+    windowsVerbatimArguments: isWindowsShim,
+    timeout: 30_000,
+    maxBuffer: 32 * 1024 * 1024,
     ...options,
   });
   assert.equal(result.error, undefined, result.error?.message);
@@ -39,19 +50,87 @@ function run(command, args, options = {}) {
   return result.stdout.trim();
 }
 
+function resolvePnpmCommand() {
+  if (process.platform !== 'win32') return 'pnpm';
+  const result = spawnSync('where.exe', ['pnpm'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, `where.exe pnpm failed\n${result.stderr}`);
+  const commands = result.stdout.split(/\r?\n/).filter(Boolean);
+  assert.ok(commands.length > 0, 'where.exe pnpm returned no executable path');
+  return commands.find((command) => /\.exe$/i.test(command)) ?? commands[0];
+}
+async function waitForRemovalReport(filename) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const report = JSON.parse(await readFile(filename, 'utf8'));
+    if (report.status !== 'pending') return report;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for uninstall worker report: ${filename}`);
+}
+
+const testTraefikBinary = process.env.BRC_TRAEFIK_TEST_BINARY;
+
+async function stageTraefikTestBinary(dataRoot) {
+  assert.ok(testTraefikBinary, 'Set BRC_TRAEFIK_TEST_BINARY to the official local Traefik v3.7+ executable.');
+  const result = spawnSync(testTraefikBinary, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  const version = result.stdout.match(/Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
+  assert.ok(version, result.stdout);
+  const [major, minor] = version.split('.').map(Number);
+  assert.ok(major > 3 || (major === 3 && minor >= 7), `Traefik ${version} is older than v3.7.`);
+  const versionDir = path.join(dataRoot, 'traefik', 'versions', version);
+  await mkdir(versionDir, { recursive: true });
+  await copyFile(testTraefikBinary, path.join(versionDir, 'traefik.exe'));
+  await writeFile(
+    path.join(dataRoot, 'traefik', 'versions.json'),
+    `${JSON.stringify({ version: 1, current: version, previous: null })}\n`,
+  );
+}
+async function updateAndStopBrc(dataRoot, root, bin, env, updatedPackage) {
+  const dataMarker = path.join(dataRoot, 'data', 'private.sqlite');
+  await mkdir(path.dirname(dataMarker), { recursive: true });
+  await writeFile(dataMarker, 'isolated test database');
+  run(pnpmCommand, ['add', '--global', '--offline', updatedPackage.tarball], { cwd: root, env });
+  const packages = run(pnpmCommand, ['list', '--global', '--depth', '-1', '--json'], { cwd: root, env });
+  assert.ok(packages.includes('@inoceanlee/brc'));
+  assert.ok(packages.includes(updatedPackage.version), `global update did not install ${updatedPackage.version}: ${packages}`);
+  assert.equal(await readFile(dataMarker, 'utf8'), 'isolated test database');
+  const status = run(bin, ['status'], { cwd: root, env });
+  assert.match(status, /relay:/);
+  run(bin, ['stop'], { cwd: root, env });
+}
+const pnpmCommand = resolvePnpmCommand();
+
 async function makePackageFixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brc-package-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
 
+  if (process.env.BRC_PACKAGE_TARBALL) {
+    assert.ok(process.env.BRC_PACKAGE_UPDATED_TARBALL, 'Set BRC_PACKAGE_UPDATED_TARBALL with a next-version package tarball.');
+    return {
+      root,
+      tarball: path.resolve(process.env.BRC_PACKAGE_TARBALL),
+      updatedTarball: path.resolve(process.env.BRC_PACKAGE_UPDATED_TARBALL),
+    };
+  }
   const outputDir = path.join(root, 'packed');
-  run(process.execPath, [packer, outputDir]);
+  run(process.execPath, [packer, outputDir, '--with-next-patch'], { timeout: 120_000 });
   const archives = (await readdir(outputDir)).filter((name) => name.endsWith('.tgz'));
-  assert.equal(archives.length, 1, 'packer must produce exactly one tarball');
-  return { root, tarball: path.join(outputDir, archives[0]) };
+  assert.equal(archives.length, 1, 'packer must produce exactly one primary tarball');
+  const updateDir = path.join(outputDir, 'next-patch');
+  const updateArchives = (await readdir(updateDir)).filter((name) => name.endsWith('.tgz'));
+  assert.equal(updateArchives.length, 1, 'packer must produce exactly one next-patch tarball');
+  return {
+    root,
+    tarball: path.join(outputDir, archives[0]),
+    updatedTarball: path.join(updateDir, updateArchives[0]),
+  };
 }
 
-test('single package tarball is complete, self-contained, and globally installable', async (t) => {
-  const { root, tarball } = await makePackageFixture(t);
+test('single package tarball is complete, self-contained, and globally installable', { timeout: 180_000 }, async (t) => {
+  const { root, tarball, updatedTarball } = await makePackageFixture(t);
   const names = run('tar', ['-tzf', tarball]).split(/\r?\n/).filter(Boolean);
   const files = new Set(names);
 
@@ -63,15 +142,30 @@ test('single package tarball is complete, self-contained, and globally installab
   }
   assert.ok(!names.some((name) => name.startsWith('package/deploy/traefik/') && /\.exe$/i.test(name)));
 
-  const manifestDir = path.join(root, 'extracted');
-  await mkdir(manifestDir);
-  run('tar', ['-xzf', tarball, '-C', manifestDir]);
-  const extractedPackage = path.join(manifestDir, 'package');
-  const manifest = JSON.parse(await readFile(path.join(extractedPackage, 'package.json'), 'utf8'));
+  const manifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json']));
+  const updatedManifest = JSON.parse(run('tar', ['-xOf', updatedTarball, 'package/package.json']));
+  const version = manifest.version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  assert.ok(version, `Expected a stable package version, got ${manifest.version}`);
+  const nextVersion = `${version[1]}.${version[2]}.${Number(version[3]) + 1}`;
+  assert.equal(updatedManifest.name, manifest.name);
+  assert.equal(updatedManifest.version, nextVersion);
+  const updatedPackage = { tarball: updatedTarball, version: updatedManifest.version };
   assert.equal(manifest.name, '@inoceanlee/brc');
+  assert.equal(manifest.license, 'MIT');
   assert.equal(manifest.bin?.brc, 'dist/cli.js');
   assert.ok(Object.values(manifest.dependencies ?? {}).every((value) => !value.startsWith('workspace:')));
+  const readme = run('tar', ['-xOf', tarball, 'package/README.md']);
+  assert.match(readme, /pnpm add -g @inoceanlee\/brc/);
+  assert.match(readme, /pnpm up -g @inoceanlee\/brc --latest/);
+  assert.match(readme, /brc uninstall/);
+  assert.match(readme, /pnpm remove -g @inoceanlee\/brc/);
 
+  const inspectionDir = path.join(root, 'inspection');
+  const extractedPackage = path.join(inspectionDir, 'package');
+  const distFiles = names.filter((name) => name.startsWith('package/dist/') && name.endsWith('.js'));
+  await mkdir(inspectionDir);
+  run('tar', ['-xzf', tarball, '-C', inspectionDir, ...distFiles]);
+  await writeFile(path.join(extractedPackage, 'package.json'), `${JSON.stringify(manifest)}\n`);
   if (process.platform !== 'win32') {
     const cliMode = (await stat(path.join(extractedPackage, 'dist/cli.js'))).mode;
     assert.notEqual(cliMode & 0o111, 0, 'CLI bin must retain executable permissions');
@@ -98,40 +192,97 @@ console.log(JSON.stringify(services.map(({ name, entrypoint, cwd }) => ({ name, 
     { name: 'agent', entrypoint: path.join(extractedPackage, 'dist', 'services', 'agent', 'cli.js'), cwd: extractedPackage },
   ]);
 
-
   const isolatedHome = path.join(root, 'pnpm-home');
   const isolatedStore = path.join(root, 'pnpm-store');
+  const isolatedCache = path.join(root, 'pnpm-cache');
+  const isolatedState = path.join(root, 'pnpm-state');
   const isolatedPath = path.join(root, 'path');
+  const bin = path.join(isolatedPath, process.platform === 'win32' ? 'brc.cmd' : 'brc');
+  const powershellShim = path.join(isolatedPath, 'brc.ps1');
   const installDir = path.join(root, 'global-install');
   const env = {
-    ...process.env,
+    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_'))),
     PNPM_HOME: isolatedHome,
-    npm_config_store_dir: isolatedStore,
-    npm_config_global_dir: installDir,
-    npm_config_global_bin_dir: isolatedPath,
-    npm_config_prefix: path.join(root, 'prefix'),
-    PATH: process.env.PATH ?? '',
+    PNPM_CONFIG_STORE_DIR: isolatedStore,
+    PNPM_CONFIG_STATE_DIR: isolatedState,
+    PNPM_CONFIG_CACHE_DIR: isolatedCache,
+    PNPM_CONFIG_GLOBAL_DIR: installDir,
+    PNPM_CONFIG_GLOBAL_BIN_DIR: isolatedPath,
+    PATH: `${isolatedPath}${path.delimiter}${process.env.PATH ?? ''}`,
   };
   const isolatedEnv = {
     ...env,
-    PATH: `${isolatedPath}${path.delimiter}${path.dirname(process.execPath)}`,
+    BRC_DATA_ROOT: path.join(root, 'brc-data'),
+    BRC_RELAY_PORT: '13000',
+    BRC_TRAEFIK_PORT: '13001',
+    BRC_TRAEFIK_HEALTH_PORT: '13002',
+    PATH: `${isolatedPath}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ''}`,
   };
-  await Promise.all([isolatedHome, isolatedStore, isolatedPath].map((directory) => mkdir(directory, { recursive: true })));
-  run('pnpm', ['--config.global-dir', installDir, '--config.global-bin-dir', isolatedPath, '--config.store-dir', isolatedStore, 'add', '--global', '--offline', tarball], {
-    cwd: root,
-    env,
-    shell: process.platform === 'win32',
-  });
+  await Promise.all([isolatedHome, isolatedStore, isolatedCache, isolatedState, isolatedPath, installDir].map((directory) => mkdir(directory, { recursive: true })));
+  for (const [setting, expected] of [
+    ['global-dir', installDir],
+    ['global-bin-dir', isolatedPath],
+    ['store-dir', isolatedStore],
+    ['state-dir', isolatedState],
+    ['cache-dir', isolatedCache],
+  ]) {
+    const actual = run(pnpmCommand, ['config', 'get', setting], { cwd: root, env });
+    assert.equal(path.resolve(actual).toLowerCase(), path.resolve(expected).toLowerCase(), `pnpm ${setting} must stay isolated`);
+  }
+  run(pnpmCommand, ['add', '--global', '--offline', tarball], { cwd: root, env });
 
-  const help = run(bin, ['help'], { cwd: root, env: isolatedEnv, shell: process.platform === 'win32' });
-  assert.match(help, /BRC unified CLI/);
+  const help = run(bin, ['help'], { cwd: root, env: isolatedEnv });
+  const wrapper = await readFile(bin, 'utf8');
+  assert.match(help, /BRC unified CLI/, `brc.cmd did not print help; wrapper contents:\n${wrapper}`);
 
   const status = run(bin, ['status'], {
     cwd: root,
     env: { ...isolatedEnv, BRC_DATA_ROOT: path.join(root, 'brc-data') },
-    shell: process.platform === 'win32',
   });
   assert.match(status, /relay:/);
   assert.match(status, /agent:/);
   assert.match(status, /traefik:/);
+  const storeMarker = path.join(isolatedStore, 'brc-preserve-marker');
+  await writeFile(storeMarker, 'shared pnpm data');
+  if (process.platform === 'win32') {
+    assert.ok(testTraefikBinary, 'Set BRC_TRAEFIK_TEST_BINARY to the official local Traefik v3.7+ executable.');
+    const shells = process.env.BRC_PACKAGE_SHELL ? [process.env.BRC_PACKAGE_SHELL] : ['cmd', 'powershell'];
+    assert.ok(shells.every((shell) => shell === 'cmd' || shell === 'powershell'), 'BRC_PACKAGE_SHELL must be cmd or powershell.');
+    for (const shell of shells) {
+      await stageTraefikTestBinary(dataRoot);
+      run(bin, ['setup'], { cwd: root, env: isolatedEnv });
+      await updateAndStopBrc(dataRoot, root, bin, isolatedEnv, updatedPackage);
+      const command = shell === 'cmd'
+        ? run(bin, ['uninstall', '--yes'], { cwd: root, env: isolatedEnv })
+        : run('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          powershellShim,
+          'uninstall',
+          '--yes',
+        ], { cwd: root, env: isolatedEnv });
+      const reportMatch = command.match(/completion report: (.+)/);
+      assert.ok(reportMatch, `${shell} uninstall did not report its completion file:\n${command}`);
+      const removalReport = await waitForRemovalReport(reportMatch[1].trim());
+
+      assert.equal(removalReport.status, 'completed', JSON.stringify(removalReport));
+      await assert.rejects(stat(dataRoot), { code: 'ENOENT' });
+      await assert.rejects(stat(bin), { code: 'ENOENT' });
+      await assert.rejects(stat(powershellShim), { code: 'ENOENT' });
+      assert.equal(run(pnpmCommand, ['list', '--global', '--depth', '-1', '--json'], { cwd: root, env }).includes('@inoceanlee/brc'), false);
+      assert.equal(await readFile(storeMarker, 'utf8'), 'shared pnpm data');
+
+      if (shell === 'cmd' && shells.includes('powershell')) run(pnpmCommand, ['add', '--global', '--offline', tarball], { cwd: root, env });
+    }
+  } else {
+    await updateAndStopBrc(dataRoot, root, bin, isolatedEnv, updatedPackage);
+    const output = run(bin, ['uninstall', '--yes'], { cwd: root, env: isolatedEnv });
+    assert.match(output, /BRC data removed/);
+    await assert.rejects(stat(dataRoot), { code: 'ENOENT' });
+    await assert.rejects(stat(bin), { code: 'ENOENT' });
+    assert.equal(await readFile(storeMarker, 'utf8'), 'shared pnpm data');
+  }
 });

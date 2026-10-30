@@ -20,7 +20,7 @@ function childEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...parent };
   for (const name of [
     'BRC_DATA_ROOT', 'BRC_HOME', 'BRC_DB', 'BRC_RELAY', 'BRC_NAME', 'BRC_TOKEN', 'BRC_DEVICE_ID', 'BRC_LOG_FILE',
-    'BRC_TRAEFIK_ROOT', 'BRC_TRAEFIK_CONFIG_DIR', 'BRC_TRAEFIK_PORT', 'BRC_TRAEFIK_HEALTH_PORT', 'BRC_RELAY_PORT',
+    'BRC_TRAEFIK_ROOT', 'BRC_TRAEFIK_CONFIG_DIR', 'BRC_TRAEFIK_PORT', 'BRC_TRAEFIK_HEALTH_PORT', 'BRC_RELAY_PORT', 'BRC_LOG_ROTATE_MIB',
     'BRC_ADMIN_USER', 'BRC_ADMIN_PASSWORD', 'BRC_SESSION_SECRET', 'PORT', 'HOST', 'PUBLIC_URL', 'TRUST_PROXY',
   ]) delete env[name];
   return env;
@@ -45,6 +45,7 @@ export function createDefaultServices(
   const baseEnv = childEnvironment(parentEnv);
   const relayEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
+    BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
     HOST: '127.0.0.1',
     PORT: String(relay),
     PUBLIC_URL: parentEnv.PUBLIC_URL || proxyUrl,
@@ -57,6 +58,10 @@ export function createDefaultServices(
   };
   const traefikEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
+    BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
+    BRC_DATA_ROOT: paths.root,
+    BRC_RUNTIME_STARTUP_TIMEOUT_MS: String(settings.runtime.startupTimeoutMs),
+    BRC_RUNTIME_SHUTDOWN_TIMEOUT_MS: String(settings.runtime.shutdownTimeoutMs),
     BRC_TRAEFIK_ROOT: paths.traefik,
     BRC_TRAEFIK_CONFIG_DIR: path.join(paths.traefik, 'config'),
     BRC_TRAEFIK_PORT: String(proxy),
@@ -66,6 +71,7 @@ export function createDefaultServices(
   };
   const agentEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
+    BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
     BRC_HOME: paths.config,
     BRC_LOG_FILE: path.join(paths.logs, 'agent.log'),
     BRC_RELAY: proxyUrl,
@@ -87,6 +93,7 @@ export interface LockedServiceOperations {
 }
 
 export class ServiceManager {
+  private services: ManagedServiceSpec[];
   private readonly lockedOperations: LockedServiceOperations = {
     start: () => this.startUnlocked(),
     stop: () => this.stopUnlocked(),
@@ -98,15 +105,13 @@ export class ServiceManager {
 
   constructor(
     paths: BrcPaths,
-    private readonly services: ManagedServiceSpec[],
+    services: ManagedServiceSpec[],
     private readonly processes: ProcessController = new ProcessManager(paths),
     private readonly lifecycleLock: LifecycleLock = new LifecycleLock(paths),
+    private readonly refreshServices?: () => Promise<ManagedServiceSpec[]>,
   ) {
-    const names = new Set<ManagedServiceSpec['name']>();
-    for (const service of services) {
-      if (names.has(service.name)) throw new Error(`Duplicate managed service: ${service.name}`);
-      names.add(service.name);
-    }
+    this.validateServices(services);
+    this.services = services;
   }
 
   start(): Promise<void> {
@@ -122,11 +127,25 @@ export class ServiceManager {
   }
 
   withLock<T>(operation: (services: LockedServiceOperations) => Promise<T>): Promise<T> {
-    return this.lifecycleLock.runExclusive(() => operation(this.lockedOperations));
+    return this.lifecycleLock.runExclusive(async () => {
+      const refreshed = await this.refreshServices?.();
+      if (refreshed) {
+        this.validateServices(refreshed);
+        this.services = refreshed;
+      }
+      return operation(this.lockedOperations);
+    });
   }
 
   status(): Promise<ServiceStatus[]> {
     return Promise.all(this.services.map((service) => this.processes.status(service)));
+  }
+  private validateServices(services: ManagedServiceSpec[]): void {
+    const names = new Set<ManagedServiceSpec['name']>();
+    for (const service of services) {
+      if (names.has(service.name)) throw new Error(`Duplicate managed service: ${service.name}`);
+      names.add(service.name);
+    }
   }
 
   private async startUnlocked(): Promise<void> {

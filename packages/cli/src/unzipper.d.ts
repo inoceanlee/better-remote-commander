@@ -2,7 +2,7 @@ declare module 'unzipper' {
   export interface ZipEntry {
     path: string;
     type: 'File' | 'Directory';
-    vars: { uncompressedSize: number };
+    uncompressedSize: number;
     stream(): NodeJS.ReadableStream;
   }
 

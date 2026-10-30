@@ -483,3 +483,41 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
   await cleanTraefikVersions(paths, runtimes, report, dryRun, cutoff);
   return report;
 }
+export async function removeBrcData(paths: BrcPaths): Promise<CleanupReport> {
+  const report: CleanupReport = { removed: 0, bytesRemoved: 0, wouldRemove: 0, failures: [], preserved: [] };
+  const root = path.resolve(paths.root);
+  let rootInfo;
+  try { rootInfo = await lstat(root); } catch (error) {
+    if (errorCode(error) === 'ENOENT') return report;
+    issue(report.failures, root, error instanceof Error ? error.message : String(error));
+    return report;
+  }
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+    issue(report.preserved, root, 'BRC data root is not a plain directory; removal stopped.');
+    return report;
+  }
+
+  for (const name of ['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'] as const) {
+    const directory = path.resolve(paths[name]);
+    if (directory !== path.join(root, name)) {
+      issue(report.preserved, directory, 'Path does not match the expected BRC data directory.');
+      continue;
+    }
+    await removeTree(root, directory, report, false);
+  }
+
+  let entries;
+  try { entries = await readdir(root, { withFileTypes: true }); } catch (error) {
+    if (errorCode(error) !== 'ENOENT') issue(report.failures, root, error instanceof Error ? error.message : String(error));
+    return report;
+  }
+  for (const entry of entries) {
+    issue(report.preserved, path.join(root, entry.name), 'Unrecognized or protected entry was retained.');
+  }
+  if (entries.length === 0) {
+    try { await rmdir(root); } catch (error) {
+      if (errorCode(error) !== 'ENOENT') issue(report.failures, root, error instanceof Error ? error.message : String(error));
+    }
+  }
+  return report;
+}

@@ -9,6 +9,13 @@ http:
         - rate
         - flight
       service: backend
+    health:
+      rule: "Path(`/ping`)"
+      entryPoints:
+        - health
+      middlewares:
+        - config-generation
+      service: ping@internal
   middlewares:
     force:
       headers:
@@ -16,16 +23,20 @@ http:
           X-BRC-Limit-Key: global-v1
     rate:
       rateLimit:
-        average: 10
-        period: 1s
-        burst: 30
+        average: @@BRC_RATE_AVERAGE@@
+        period: @@BRC_RATE_PERIOD@@
+        burst: @@BRC_RATE_BURST@@
         sourceCriterion:
           requestHeaderName: X-BRC-Limit-Key
     flight:
       inFlightReq:
-        amount: 16
+        amount: @@BRC_CONCURRENT@@
         sourceCriterion:
           requestHeaderName: X-BRC-Limit-Key
+    config-generation:
+      headers:
+        customResponseHeaders:
+          X-BRC-Config-Generation: @@BRC_CONFIG_GENERATION@@
   services:
     backend:
       loadBalancer:

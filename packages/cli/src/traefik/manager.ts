@@ -1,0 +1,246 @@
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
+import type { BrcPaths } from '../config/paths.js';
+import type { BrcSettings } from '../config/settings.js';
+import type { LockedServiceOperations, ServiceManager } from '../lifecycle/services.js';
+import { ensureSafeDirectory, readManifest, type TraefikRelease, type VersionManifest } from './core.js';
+import { TraefikInput, type TraefikInputOptions } from './input.js';
+import { TraefikOutput } from './output.js';
+import { runHealthProbe, verifyExecutable, waitForConfigGeneration } from './runtime.js';
+
+export interface TraefikManagerOptions extends TraefikInputOptions {
+  verifyExecutable?: (filename: string, version: string) => Promise<void>;
+  healthCheck?: (filename: string, version: string) => Promise<void>;
+  loadSettings?: () => Promise<Readonly<BrcSettings>>;
+}
+
+export type TraefikLifecycle = Pick<ServiceManager, 'status' | 'withLock'>;
+
+export class TraefikManager {
+  private queue: Promise<void> = Promise.resolve();
+  private readonly input: TraefikInput;
+  private readonly output: TraefikOutput;
+  private readonly verify: (filename: string, version: string) => Promise<void>;
+  private readonly healthCheck: (filename: string, version: string) => Promise<void>;
+  private readonly loadSettings: () => Promise<Readonly<BrcSettings>>;
+
+  constructor(
+    private readonly paths: BrcPaths,
+    settings: Readonly<BrcSettings>,
+    private readonly lifecycle: TraefikLifecycle,
+    options: TraefikManagerOptions = {},
+  ) {
+    this.input = new TraefikInput(paths, options);
+    this.output = new TraefikOutput(paths, settings);
+    this.loadSettings = options.loadSettings ?? (async () => settings);
+    this.verify = options.verifyExecutable ?? ((filename, version) => verifyExecutable(filename, version, settings));
+    this.healthCheck = options.healthCheck ?? (async (filename) => runHealthProbe(filename, paths, settings, await this.output.readTemplates()));
+  }
+
+  setup(): Promise<void> {
+    return this.exclusive(async () => {
+      await this.prepareDirectories();
+      const installed = await readManifest(this.paths.traefik);
+      if (installed) {
+        const executable = await this.output.executableFor(installed.current);
+        await this.verify(executable, installed.current);
+        await this.healthCheck(executable, installed.current);
+        await this.lifecycle.withLock(async () => {
+          const current = await readManifest(this.paths.traefik);
+          if (!current || current.current !== installed.current) {
+            throw new Error('Traefik installation changed while setup was waiting for the lifecycle lock.');
+          }
+          const status = await this.serviceStatus();
+          if (status?.state === 'starting' || status?.state === 'degraded') {
+            throw new Error(`Cannot apply Traefik configuration while its service is ${status.state}: ${status.detail}`);
+          }
+          if (status?.state !== 'running') await this.writeCurrentConfig();
+        });
+        return;
+      }
+
+      const release = await this.input.latestRelease();
+      const stage = await this.input.downloadAndStage(release);
+      try {
+        await this.validateCandidate(stage, release);
+        await this.lifecycle.withLock(async () => {
+          if (await readManifest(this.paths.traefik)) return;
+          await this.writeCurrentConfig();
+          await this.output.promoteVersion(stage, release.version, null);
+        });
+      } finally {
+        await rm(stage, { recursive: true, force: true });
+      }
+    });
+  }
+
+  update(): Promise<void> {
+    return this.exclusive(async () => {
+      await this.prepareDirectories();
+      const initiallyInstalled = await readManifest(this.paths.traefik);
+      if (!initiallyInstalled) throw new Error('Traefik is not installed. Run brc setup first.');
+      const release = await this.input.latestRelease();
+      if (release.version === initiallyInstalled.current) {
+        await this.lifecycle.withLock(async () => {
+          const current = await readManifest(this.paths.traefik);
+          if (!current) throw new Error('Traefik is not installed. Run brc setup first.');
+          if (current.current !== release.version) {
+            throw new Error('Traefik installation changed while update was waiting for the lifecycle lock; retry the update.');
+          }
+        });
+        return;
+      }
+
+      const stage = await this.input.downloadAndStage(release);
+      try {
+        await this.validateCandidate(stage, release);
+        await this.lifecycle.withLock(async (operations) => {
+          const installed = await readManifest(this.paths.traefik);
+          if (!installed) throw new Error('Traefik is not installed. Run brc setup first.');
+          if (release.version === installed.current) {
+            return;
+          }
+          const running = await this.isRunning();
+          try {
+            if (running) await operations.stop();
+            await this.output.promoteVersion(stage, release.version, installed.current);
+            if (running) {
+              await operations.start();
+              if (!await this.isRunning()) throw new Error('Traefik did not become healthy after update.');
+            }
+          } catch (error) {
+            await this.restoreVersion(installed, running, operations, error);
+          }
+        });
+      } finally {
+        await rm(stage, { recursive: true, force: true });
+      }
+    });
+  }
+
+  async currentVersion(): Promise<string | null> {
+    return (await readManifest(this.paths.traefik))?.current ?? null;
+  }
+
+  rollbackUpdate(): Promise<void> {
+    return this.exclusive(async () => {
+      const initial = await readManifest(this.paths.traefik);
+      if (!initial?.previous) throw new Error('No previous Traefik version is available for rollback.');
+      const executable = await this.output.executableFor(initial.previous);
+      await this.verify(executable, initial.previous);
+      await this.healthCheck(executable, initial.previous);
+      const rollback: VersionManifest = { version: 1, current: initial.previous, previous: initial.current };
+      await this.lifecycle.withLock(async (operations) => {
+        const installed = await readManifest(this.paths.traefik);
+        if (!installed || installed.current !== initial.current || installed.previous !== initial.previous) {
+          throw new Error('Traefik installation changed while rollback was waiting for the lifecycle lock.');
+        }
+        const wasRunning = await this.isRunning();
+        try {
+          if (wasRunning) await operations.stop();
+          await this.output.writeManifest(rollback);
+          if (wasRunning) {
+            await operations.start();
+            if (!await this.isRunning()) throw new Error('Traefik did not become healthy after rollback.');
+          }
+        } catch (error) {
+          await this.restoreVersion(installed, wasRunning, operations, error);
+        }
+      });
+    });
+  }
+
+  writeConfig(previous?: Readonly<BrcSettings>): Promise<void> {
+    return this.lifecycle.withLock(async () => {
+      await this.writeConfigAndConfirm(await this.loadSettings(), previous);
+    });
+  }
+  writeConfigWithLockHeld(settings: Readonly<BrcSettings>, previous?: Readonly<BrcSettings>): Promise<void> {
+    return this.writeConfigAndConfirm(settings, previous);
+  }
+
+  private async writeCurrentConfig(): Promise<void> {
+    await this.writeConfigAndConfirm(await this.loadSettings(), undefined);
+  }
+
+  private async writeConfigAndConfirm(
+    settings: Readonly<BrcSettings>,
+    previous: Readonly<BrcSettings> | undefined,
+  ): Promise<void> {
+    const status = await this.serviceStatus();
+    if (status?.state === 'starting' || status?.state === 'degraded') {
+      throw new Error(`Cannot apply Traefik configuration while its service is ${status.state}: ${status.detail}`);
+    }
+    if (status?.state === 'running' && !previous) {
+      throw new Error('Previous settings are required to safely apply Traefik configuration while its service is running.');
+    }
+    const dynamicSettings = status?.state === 'running' && previous
+      && previous.services.relayPort !== settings.services.relayPort
+      ? { ...settings, services: { ...settings.services, relayPort: previous.services.relayPort } }
+      : settings;
+    const staticSettings = status?.state === 'running' && previous ? previous : settings;
+    const generation = randomUUID();
+    await this.output.writeConfig(settings, generation, dynamicSettings, staticSettings);
+    if (status?.state !== 'running') return;
+    const ports = previous
+      ? [settings.services.healthPort, previous.services.healthPort]
+      : [settings.services.healthPort];
+    await waitForConfigGeneration(ports, generation, settings.runtime.startupTimeoutMs);
+  }
+
+  private async serviceStatus() {
+    return (await this.lifecycle.status()).find((service) => service.name === 'traefik');
+  }
+
+  private async validateCandidate(stage: string, release: TraefikRelease): Promise<void> {
+    const executable = path.join(stage, 'traefik.exe');
+    await this.verify(executable, release.version);
+    await this.healthCheck(executable, release.version);
+  }
+
+  private async isRunning(): Promise<boolean> {
+    const status = await this.serviceStatus();
+    if (!status) throw new Error('Traefik is not registered with the lifecycle service manager.');
+    if (status.state === 'starting' || status.state === 'degraded') {
+      throw new Error(`Cannot change Traefik version while its service is ${status.state}: ${status.detail}`);
+    }
+    return status.state === 'running';
+  }
+
+  private async restoreVersion(
+    manifest: VersionManifest,
+    wasRunning: boolean,
+    operations: LockedServiceOperations,
+    cause: unknown,
+  ): Promise<never> {
+    const errors: unknown[] = [cause];
+    try {
+      await this.output.writeManifest(manifest);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (wasRunning) {
+      try {
+        await operations.start();
+        if (!await this.isRunning()) throw new Error('Traefik did not become healthy after rollback recovery.');
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 1) throw new AggregateError(errors, 'Traefik update failed and rollback was incomplete.');
+    throw cause;
+  }
+
+  private async prepareDirectories(): Promise<void> {
+    await ensureSafeDirectory(this.paths.root, this.paths.traefik);
+    await ensureSafeDirectory(this.paths.root, path.join(this.paths.traefik, 'versions'));
+    await ensureSafeDirectory(this.paths.root, this.paths.tmp);
+  }
+
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(operation);
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}

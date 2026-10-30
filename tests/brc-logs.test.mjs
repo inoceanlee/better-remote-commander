@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { appendRotatingLog } from '../packages/shared/dist/managed-log.js';
 
 const logsEntry = fileURLToPath(new URL('../packages/cli/dist/maintenance/logs.js', import.meta.url));
 const logsUrl = JSON.stringify(pathToFileURL(logsEntry).href);
@@ -172,4 +174,18 @@ console.log(JSON.stringify({ exitCode, output, errors }));
   assert.equal(result.exitCode, 1);
   assert.deepEqual(result.output, []);
   assert.match(result.errors.join('\n'), /link|directory/i);
+});
+
+test('managed log rotation honors BRC_LOG_ROTATE_MIB', async (t) => {
+  const fixture = await makeFixture(t);
+  const filename = path.join(fixture.logs, 'configured.log');
+  const previous = process.env.BRC_LOG_ROTATE_MIB;
+  process.env.BRC_LOG_ROTATE_MIB = '1';
+  try {
+    await appendRotatingLog(filename, Buffer.alloc(1024 * 1024 + 5, 0x61));
+    assert.equal((await readFile(filename)).length, 1024 * 1024);
+  } finally {
+    if (previous === undefined) delete process.env.BRC_LOG_ROTATE_MIB;
+    else process.env.BRC_LOG_ROTATE_MIB = previous;
+  }
 });

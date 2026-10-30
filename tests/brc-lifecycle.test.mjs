@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -54,6 +55,7 @@ await new Promise((resolve, reject) => {
 });
 const address = control.address();
 const ready = readyFile + '.tmp';
+if (process.env.BRC_TEST_READY_BEFORE_READY_DELAY) await new Promise((resolve) => setTimeout(resolve, Number(process.env.BRC_TEST_READY_BEFORE_READY_DELAY)));
 writeFileSync(ready, JSON.stringify({ id, service: name, pid: process.pid, port: address.port }));
 renameSync(ready, readyFile);
 if (mode === 'exit') setTimeout(() => process.exit(0), Number(process.env.BRC_TEST_EXIT_MS ?? 250));
@@ -98,6 +100,19 @@ async function makeHarness(t, options = {}) {
   });
   return { root, paths: runtimePaths, spec, manager, entrypoint };
 }
+
+test('runtime timeout updates apply to the next managed process start', async (t) => {
+  const harness = await makeHarness(t, {
+    startupTimeoutMs: 50,
+    shutdownTimeoutMs: 300,
+    env: { BRC_TEST_READY_BEFORE_READY_DELAY: '200' },
+  });
+
+  harness.manager.updateRuntimeSettings({ startupTimeoutMs: 1000, shutdownTimeoutMs: 500 });
+  await harness.manager.start(harness.spec);
+
+  assert.equal((await harness.manager.status(harness.spec)).state, 'running');
+});
 
 class FakeProcessManager {
   constructor({ failStart, delayMs = 0 } = {}) {
@@ -207,6 +222,124 @@ test('starts in order, makes start and stop idempotent, and stops in reverse ord
   await manager.stop();
 
   assert.deepEqual(processes.calls, ['start:relay', 'start:agent', 'stop:agent', 'stop:relay']);
+});
+
+test('service operations refresh configuration after acquiring the shared lock', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-services-refresh-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimePaths = paths(root);
+  const initial = workspaceServices(root).map((spec) => ({ ...spec, env: { PORT: '13000' } }));
+  const refreshed = workspaceServices(root).map((spec) => ({ ...spec, env: { PORT: '13001' } }));
+  const lock = new LifecycleLock(runtimePaths);
+  const processes = new FakeProcessManager();
+  const startedPorts = [];
+  const start = processes.start.bind(processes);
+  processes.start = async (spec) => {
+    startedPorts.push(spec.env.PORT);
+    await start(spec);
+  };
+  let refreshCount = 0;
+  const manager = new ServiceManager(runtimePaths, initial, processes, lock, async () => {
+    await assert.rejects(lock.runExclusive(async () => {}), /cannot be acquired recursively/i);
+    refreshCount++;
+    return refreshed;
+  });
+
+  await manager.start();
+
+  assert.equal(refreshCount, 1);
+  assert.deepEqual(startedPorts, ['13001', '13001']);
+});
+
+test('service start refreshes settings changed by another CLI process', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cross-process-config-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_')));
+  env.BRC_DATA_ROOT = root;
+  const cliEntry = fileURLToPath(new URL('../packages/cli/dist/cli.js', import.meta.url));
+  const initial = spawnSync(process.execPath, [cliEntry, 'config', 'set', 'services.relayPort', '13000'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(initial.status, 0, initial.stderr || initial.stdout);
+
+  const readyFile = path.join(root, 'ready');
+  const gateFile = path.join(root, 'continue');
+  const portFile = path.join(root, 'started-port');
+  const source = `
+import { readFile, writeFile } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { resolveBrcPaths } from ${JSON.stringify(new URL('../packages/cli/dist/config/paths.js', import.meta.url).href)};
+import { readSettings } from ${JSON.stringify(new URL('../packages/cli/dist/config/reader.js', import.meta.url).href)};
+import { createDefaultServices, ServiceManager } from ${JSON.stringify(new URL('../packages/cli/dist/lifecycle/services.js', import.meta.url).href)};
+import { LifecycleLock } from ${JSON.stringify(new URL('../packages/cli/dist/lifecycle/lock.js', import.meta.url).href)};
+const paths = resolveBrcPaths(process.env);
+const initial = await readSettings(paths, process.env);
+if (initial.settings.services.relayPort !== 13000) throw new Error('initial settings were not loaded');
+const relayServices = (settings) => createDefaultServices(paths, settings, process.env).filter((service) => service.name === 'relay');
+const states = new Map();
+const processes = {
+  async status(spec) { return states.get(spec.name) ?? { name: spec.name, state: 'stopped', pid: null, detail: 'not started' }; },
+  async start(spec) {
+    await writeFile(${JSON.stringify(portFile)}, spec.env.PORT);
+    states.set(spec.name, { name: spec.name, state: 'running', pid: 100, detail: 'healthy' });
+  },
+  async stop(spec) { states.set(spec.name, { name: spec.name, state: 'stopped', pid: null, detail: 'stopped' }); },
+};
+const lock = new LifecycleLock(paths);
+const manager = new ServiceManager(paths, relayServices(initial.settings), processes, lock, async () => {
+  const current = await readSettings(paths, process.env);
+  return relayServices(current.settings);
+});
+await writeFile(${JSON.stringify(readyFile)}, 'ready');
+for (;;) {
+  try { await readFile(${JSON.stringify(gateFile)}); break; }
+  catch { await sleep(10); }
+}
+await manager.start();
+`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: process.cwd(),
+    env,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+  const childResult = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+  t.after(async () => {
+    if (child.exitCode === null) {
+      child.kill();
+      await childResult;
+    }
+  });
+
+  for (let attempt = 0; attempt < 200; attempt++) {
+    try {
+      await readFile(readyFile);
+      break;
+    } catch {
+      if (child.exitCode !== null) assert.fail(`service process exited before loading settings: ${stderr}`);
+      await sleep(10);
+    }
+  }
+  assert.equal(await readFile(readyFile, 'utf8'), 'ready');
+
+  const settingsFile = path.join(root, 'config', 'brc.yaml');
+  const yaml = await readFile(settingsFile, 'utf8');
+  const updatedYaml = yaml.replace('relayPort: 13000', 'relayPort: 13003');
+  assert.notEqual(updatedYaml, yaml);
+  await writeFile(settingsFile, updatedYaml);
+  const applied = spawnSync(process.execPath, [cliEntry, 'config', 'apply'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  await writeFile(gateFile, 'continue');
+
+  assert.deepEqual(await childResult, { code: 0, signal: null }, stderr);
+  assert.equal(await readFile(portFile, 'utf8'), '13003');
 });
 
 test('rolls back already-started services when a later service fails', async (t) => {

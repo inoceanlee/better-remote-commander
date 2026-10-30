@@ -190,8 +190,10 @@ test('config apply loads and applies user-edited configuration', async (t) => {
 });
 
 test('failed config application restores the last valid file and settings', async (t) => {
+  const appliedPorts = [];
   const { manager, paths, env, apply } = await createFixture(t, {
-    apply: async (settings) => {
+    apply: async (settings, previous) => {
+      appliedPorts.push([settings.services.relayPort, previous.services.relayPort]);
       if (settings.services.relayPort === 3100) throw new Error('apply failed');
     },
   });
@@ -206,6 +208,7 @@ test('failed config application restores the last valid file and settings', asyn
   assert.equal(reloaded.get('services.relayPort').value, 3001);
   assert.equal(await readFile(filename, 'utf8'), lastValidFile);
   assert.equal(await readFile(path.join(paths.config, 'brc.yaml.last-good'), 'utf8'), lastValidFile);
+  assert.deepEqual(appliedPorts, [[3001, 3000], [3100, 3001], [3001, 3001]]);
 });
 
 test('failed first config write removes new file and preserves defaults', async (t) => {
@@ -234,4 +237,15 @@ test('concurrent setting changes preserve both values on disk', async (t) => {
 
   assert.equal(persisted.get('proxy.rate.average').value, 20);
   assert.equal(persisted.get('proxy.rate.burst').value, 40);
+});
+test('setup initializes missing settings and records the last-good configuration', async (t) => {
+  const { manager, paths } = await createFixture(t);
+
+  await manager.ensureConfigFile();
+
+  const filename = path.join(paths.config, 'brc.yaml');
+  const contents = await readFile(filename, 'utf8');
+  assert.match(contents, /version: 1/);
+  assert.equal(await readFile(path.join(paths.config, 'brc.yaml.last-good'), 'utf8'), contents);
+  assert.deepEqual(manager.snapshot(), DEFAULT_SETTINGS);
 });

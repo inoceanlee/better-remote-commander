@@ -5,6 +5,17 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 
 export const DEFAULT_MANAGED_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+function configuredManagedLogMaxBytes(): number {
+  const value = process.env.BRC_LOG_ROTATE_MIB;
+  if (value === undefined) return DEFAULT_MANAGED_LOG_MAX_BYTES;
+  const mebibytes = Number(value);
+  const maxBytes = mebibytes * 1024 * 1024;
+  if (!Number.isSafeInteger(mebibytes) || mebibytes < 1 || !Number.isSafeInteger(maxBytes)) {
+    throw new Error('BRC_LOG_ROTATE_MIB must be a positive integer MiB value.');
+  }
+  return maxBytes;
+}
 const ROTATION_SUFFIX = '.1';
 const TRUNCATION_MARKER = Buffer.from('\n[log entry truncated]\n');
 const writeQueues = new Map<string, Promise<void>>();
@@ -65,7 +76,7 @@ async function appendOnce(filename: string, chunk: Buffer, maxBytes: number): Pr
 export async function appendRotatingLog(
   filename: string,
   input: string | Uint8Array,
-  maxBytes = DEFAULT_MANAGED_LOG_MAX_BYTES,
+  maxBytes = configuredManagedLogMaxBytes(),
 ): Promise<void> {
   if (!path.isAbsolute(filename)) throw new Error('Managed log path must be absolute.');
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Managed log size limit must be a positive safe integer.');
@@ -98,7 +109,7 @@ export interface ManagedLogSink {
 export function installManagedLog(options: { maxBytes?: number } = {}): ManagedLogSink | undefined {
   const filename = process.env.BRC_LOG_FILE;
   if (!filename) return undefined;
-  const stream = new RotatingLogStream(filename, options.maxBytes ?? DEFAULT_MANAGED_LOG_MAX_BYTES);
+  const stream = new RotatingLogStream(filename, options.maxBytes ?? configuredManagedLogMaxBytes());
   const logger = new Console({ stdout: stream, stderr: stream, ignoreErrors: true });
   const target = console as unknown as Record<string, (...args: unknown[]) => void>;
   for (const method of ['debug', 'error', 'info', 'log', 'warn'] as const) {

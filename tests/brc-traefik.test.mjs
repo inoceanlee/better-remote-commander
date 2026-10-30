@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { copyFile, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -10,11 +11,17 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
 import { createDefaultServices, ServiceManager } from '../packages/cli/dist/lifecycle/services.js';
-import { TraefikManager } from '../packages/cli/dist/traefik.js';
+import { DEFAULT_SETTINGS } from '../packages/cli/dist/config/settings.js';
+import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
+import { SettingsManager } from '../packages/cli/dist/config/manager.js';
+import { TraefikManager } from '../packages/cli/dist/traefik/manager.js';
+import { waitForConfigGeneration } from '../packages/cli/dist/traefik/runtime.js';
 
 const API_URL = 'https://api.github.com/repos/traefik/traefik/releases/latest';
 const TEST_BINARY = process.env.BRC_TRAEFIK_TEST_BINARY;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const require = createRequire(new URL('../packages/cli/package.json', import.meta.url));
+const yaml = require('js-yaml');
 
 function paths(root) {
   return {
@@ -28,10 +35,10 @@ function paths(root) {
   };
 }
 
-async function makeRoot(t) {
+async function makeRoot(t, { cleanup = true } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brc-traefik-'));
   const brcPaths = paths(root);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  if (cleanup) t.after(() => rm(root, { recursive: true, force: true }));
   return { root, paths: brcPaths };
 }
 
@@ -109,8 +116,10 @@ function makeRelease(version, options = {}) {
     if (url.href === API_URL) {
       return new Response(JSON.stringify(state.release), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.pathname.endsWith(checksumFilename)) return new Response(state.checksumText, { status: 200 });
-    if (url.pathname.endsWith(filename)) {
+    const checksumAsset = state.release.assets.find((asset) => asset.name.endsWith('_checksums.txt'));
+    const archiveAsset = state.release.assets.find((asset) => asset.name.endsWith('_windows_amd64.zip'));
+    if (url.href === checksumAsset?.browser_download_url) return new Response(state.checksumText, { status: 200 });
+    if (url.href === archiveAsset?.browser_download_url) {
       if (state.interrupted) {
         return new Response(new ReadableStream({
           start(controller) {
@@ -133,16 +142,156 @@ function makeRelease(version, options = {}) {
   return state;
 }
 
+function settingsFor(env = {}) {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.services.relayPort = Number(env.BRC_RELAY_PORT ?? 13000);
+  settings.services.proxyPort = Number(env.BRC_TRAEFIK_PORT ?? 13001);
+  settings.services.healthPort = Number(env.BRC_TRAEFIK_HEALTH_PORT ?? 13002);
+  return settings;
+}
+
+function makeLifecycle() {
+  const state = {
+    service: 'stopped',
+    events: [],
+    lockHeld: false,
+    failNextStart: false,
+    failNextStop: false,
+    beforeLock: undefined,
+  };
+  const operations = {
+    start: async () => {
+      state.events.push('start');
+      if (state.failNextStart) {
+        state.failNextStart = false;
+        throw new Error('candidate service failed to start');
+      }
+      state.service = 'running';
+    },
+    stop: async () => {
+      state.events.push('stop');
+      if (state.failNextStop) {
+        state.failNextStop = false;
+        throw new Error('candidate service failed to stop');
+      }
+      state.service = 'stopped';
+    },
+    restart: async () => { state.events.push('restart'); state.service = 'running'; },
+  };
+  return {
+    state,
+    status: async () => [{ name: 'traefik', state: state.service, pid: null, detail: '' }],
+    withLock: async (operation) => {
+      assert.equal(state.lockHeld, false);
+      state.lockHeld = true;
+      try {
+        await state.beforeLock?.();
+        state.beforeLock = undefined;
+        return await operation(operations);
+      } finally {
+        state.lockHeld = false;
+      }
+    },
+  };
+}
+test('a failed service stop restores the previous Traefik version and service', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const lifecycle = makeLifecycle();
+  const manager = makeManager(brcPaths, release, { lifecycle });
+  await manager.setup();
+
+  lifecycle.state.service = 'running';
+  lifecycle.state.failNextStop = true;
+  release.setVersion('3.7.17');
+  await assert.rejects(manager.update(), /failed to stop/i);
+
+  assert.deepEqual(await manifest(brcPaths), { version: 1, current: '3.7.16', previous: null });
+  assert.deepEqual(lifecycle.state.events, ['stop', 'start']);
+  assert.equal(lifecycle.state.service, 'running');
+});
+
+test('Traefik update preserves the active Relay target with a pending port change', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const lifecycle = makeLifecycle();
+  const settings = settingsFor();
+  const relayPort = settings.services.relayPort;
+  const manager = makeManager(brcPaths, release, { lifecycle, settings });
+  await manager.setup();
+
+  lifecycle.state.service = 'running';
+  settings.services.relayPort = relayPort + 1;
+  release.setVersion('3.7.17');
+  await manager.update();
+
+  const dynamic = yaml.safeLoad(await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8'));
+  assert.equal(dynamic.http.services.backend.loadBalancer.servers[0].url, `http://127.0.0.1:${relayPort}`);
+});
+
+test('Traefik update keeps a pending proxy port until the Agent can restart', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const healthServer = createServer(async (_request, response) => {
+    const dynamic = await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8');
+    const configGeneration = dynamic.match(/X-BRC-Config-Generation:\s*"?([0-9a-f-]{36})"?/i)?.[1];
+    if (!configGeneration) {
+      response.writeHead(500).end('missing config generation');
+      return;
+    }
+    response.writeHead(200, { 'X-BRC-Config-Generation': configGeneration }).end('ok');
+  });
+  const healthPort = await listen(healthServer);
+  t.after(() => new Promise((resolve) => healthServer.close(resolve)));
+
+  const release = makeRelease('3.7.16');
+  const lifecycle = makeLifecycle();
+  const settings = settingsFor({ BRC_TRAEFIK_HEALTH_PORT: String(healthPort) });
+  const activeProxyPort = settings.services.proxyPort;
+  const manager = makeManager(brcPaths, release, { lifecycle, settings });
+  await manager.setup();
+
+  lifecycle.state.service = 'running';
+  const previous = structuredClone(settings);
+  settings.services.proxyPort++;
+  await manager.writeConfig(previous);
+  release.setVersion('3.7.17');
+  await manager.update();
+
+  const staticConfig = await readFile(path.join(brcPaths.traefik, 'config', 'traefik.yml'), 'utf8');
+  assert.match(staticConfig, new RegExp(`127\\.0\\.0\\.1:${activeProxyPort}`));
+  assert.doesNotMatch(staticConfig, new RegExp(`127\\.0\\.0\\.1:${settings.services.proxyPort}`));
+});
+
+test('update rejects an installed-version change while waiting for the lifecycle lock', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const lifecycle = makeLifecycle();
+  const manager = makeManager(brcPaths, release, { lifecycle });
+  await manager.setup();
+
+  lifecycle.state.beforeLock = async () => {
+    await writeFile(path.join(brcPaths.traefik, 'versions.json'), `${JSON.stringify({
+      version: 1,
+      current: '3.7.15',
+      previous: null,
+    })}\n`);
+  };
+  await assert.rejects(manager.update(), /changed|retry/i);
+  assert.deepEqual(await manifest(brcPaths), { version: 1, current: '3.7.15', previous: null });
+});
+
 function makeManager(paths, release, options = {}) {
-  return new TraefikManager(paths, {
+  const env = options.env ?? { BRC_RELAY_PORT: '13000', BRC_TRAEFIK_PORT: '13001', BRC_TRAEFIK_HEALTH_PORT: '13002' };
+  const lifecycle = options.lifecycle ?? makeLifecycle();
+  const { env: _env, lifecycle: _lifecycle, settings: customSettings, ...managerOptions } = options;
+  return new TraefikManager(paths, customSettings ?? settingsFor(env), lifecycle, {
     releaseApiUrl: API_URL,
     fetch: release.fetch,
-    env: { BRC_RELAY_PORT: '13000', BRC_TRAEFIK_PORT: '13001', BRC_TRAEFIK_HEALTH_PORT: '13002' },
     verifyExecutable: async (filename, expectedVersion) => {
       assert.equal(await readFile(filename, 'utf8'), `binary-${expectedVersion}`);
     },
-    healthCheck: async () => {},
-    ...options,
+    healthCheck: async () => { },
+    ...managerOptions,
   });
 }
 
@@ -153,6 +302,78 @@ async function manifest(paths) {
 async function installedExecutable(paths, version) {
   return readFile(path.join(paths.traefik, 'versions', version, 'traefik.exe'), 'utf8');
 }
+
+test('configuration uses BrcSettings and keeps a single public proxy router', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.proxy.rate.average = 7;
+  settings.proxy.rate.period = '2s';
+  settings.proxy.rate.burst = 19;
+  settings.proxy.concurrent = 11;
+  const manager = makeManager(brcPaths, makeRelease('3.7.16'), { settings });
+
+  await manager.writeConfig();
+
+  const configDirectory = path.join(brcPaths.traefik, 'config');
+  const dynamic = yaml.safeLoad(await readFile(path.join(configDirectory, 'dynamic.yml'), 'utf8'));
+  const staticConfig = yaml.safeLoad(await readFile(path.join(configDirectory, 'traefik.yml'), 'utf8'));
+  assert.equal(dynamic.http.middlewares.rate.rateLimit.average, 7);
+  assert.equal(dynamic.http.middlewares.rate.rateLimit.period, '2s');
+  assert.equal(dynamic.http.middlewares.rate.rateLimit.burst, 19);
+  assert.equal(dynamic.http.middlewares.flight.inFlightReq.amount, 11);
+  assert.equal(dynamic.http.middlewares.force.headers.customRequestHeaders['X-BRC-Limit-Key'], 'global-v1');
+  assert.equal(Object.values(dynamic.http.routers).filter((router) => router.entryPoints.includes('web')).length, 1);
+  assert.deepEqual(dynamic.http.routers.health?.entryPoints, ['health']);
+  assert.equal(dynamic.http.routers.health?.rule, 'Path(`/ping`)');
+  assert.equal(dynamic.http.routers.health?.service, 'ping@internal');
+  assert.equal(dynamic.http.routers.health?.middlewares?.[0], 'config-generation');
+  assert.match(dynamic.http.middlewares['config-generation']?.headers?.customResponseHeaders?.['X-BRC-Config-Generation'] ?? '', /^[0-9a-f-]{36}$/);
+  assert.equal(staticConfig.ping.manualRouting, true);
+  assert.equal(staticConfig.entryPoints.health.address, `127.0.0.1:${settings.services.healthPort}`);
+});
+
+test('config changes write Traefik limits under the shared lifecycle lock', async (t) => {
+  const { root, paths: brcPaths } = await makeRoot(t);
+  const lifecycleLock = new LifecycleLock(brcPaths);
+  const serviceManager = new ServiceManager(brcPaths, [], {
+    start: async () => {},
+    stop: async () => {},
+    status: async () => ({ name: 'traefik', state: 'stopped', pid: null, detail: 'stopped' }),
+  }, lifecycleLock);
+  const traefikManager = new TraefikManager(brcPaths, DEFAULT_SETTINGS, serviceManager);
+  const settingsManager = await SettingsManager.load(brcPaths, { BRC_DATA_ROOT: root }, {
+    lock: lifecycleLock,
+    apply: async (settings) => traefikManager.writeConfigWithLockHeld(settings),
+  });
+
+  await settingsManager.set('proxy.rate.average', 17);
+
+  const dynamic = await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8');
+  assert.match(dynamic, /average: 17/);
+});
+
+test('Traefik writes the latest settings while holding the shared lifecycle lock', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const lifecycleLock = new LifecycleLock(brcPaths);
+  const serviceManager = new ServiceManager(brcPaths, [], {
+    start: async () => {},
+    stop: async () => {},
+    status: async () => ({ name: 'traefik', state: 'stopped', pid: null, detail: 'stopped' }),
+  }, lifecycleLock);
+  const latest = structuredClone(DEFAULT_SETTINGS);
+  latest.proxy.rate.average = 23;
+  const manager = new TraefikManager(brcPaths, DEFAULT_SETTINGS, serviceManager, {
+    loadSettings: async () => {
+      await assert.rejects(lifecycleLock.runExclusive(async () => {}), /cannot be acquired recursively/i);
+      return latest;
+    },
+  });
+
+  await manager.writeConfig();
+
+  const dynamic = await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8');
+  assert.match(dynamic, /average: 23/);
+});
 
 test('setup installs verified stable release once and retains its executable', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
@@ -230,6 +451,29 @@ test('a candidate that fails health validation leaves the old release available 
   await assert.rejects(stat(path.join(brcPaths.traefik, 'versions', '3.7.17')));
 });
 
+test('a failed service restart restores the prior Traefik version under the shared lock', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const lifecycle = makeLifecycle();
+  const manager = makeManager(brcPaths, release, { lifecycle });
+  await manager.setup();
+
+  lifecycle.state.service = 'running';
+  release.setVersion('3.7.17');
+  const fetch = release.fetch;
+  release.fetch = async (...args) => {
+    assert.equal(lifecycle.state.lockHeld, false, 'release downloads must stay outside the lifecycle lock');
+    return fetch(...args);
+  };
+  lifecycle.state.failNextStart = true;
+  await assert.rejects(manager.update(), /candidate service failed to start/i);
+
+  assert.deepEqual(await manifest(brcPaths), { version: 1, current: '3.7.16', previous: null });
+  assert.equal(await installedExecutable(brcPaths, '3.7.16'), 'binary-3.7.16');
+  assert.deepEqual(lifecycle.state.events, ['stop', 'start', 'start']);
+  assert.equal(lifecycle.state.service, 'running');
+});
+
 test('concurrent setup calls share one validated installation', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   const release = makeRelease('3.7.16');
@@ -249,13 +493,25 @@ test('service order keeps Relay behind Traefik and routes Agent traffic through 
     BRC_TRAEFIK_HEALTH_PORT: '13002',
     PUBLIC_URL: 'https://brc.example.test',
   };
-  const services = createDefaultServices(brcPaths, env);
+  const settings = {
+    ...structuredClone(DEFAULT_SETTINGS),
+    services: { ...DEFAULT_SETTINGS.services, relayPort: 13000, proxyPort: 13001, healthPort: 13002 },
+    logs: { ...DEFAULT_SETTINGS.logs, rotateMiB: 2 },
+    runtime: { ...DEFAULT_SETTINGS.runtime, startupTimeoutMs: 12345, shutdownTimeoutMs: 6789 },
+  };
+  const services = createDefaultServices(brcPaths, settings, env);
 
   assert.deepEqual(services.map((service) => service.name), ['relay', 'traefik', 'agent']);
   assert.equal(services[0].env.PORT, '13000');
   assert.equal(services[0].env.PUBLIC_URL, 'https://brc.example.test');
   assert.equal(services[1].env.BRC_TRAEFIK_ROOT, brcPaths.traefik);
+  assert.equal(services[1].env.BRC_DATA_ROOT, brcPaths.root);
   assert.equal(services[1].env.BRC_TRAEFIK_PORT, '13001');
+  assert.equal(services[1].env.BRC_RUNTIME_STARTUP_TIMEOUT_MS, '12345');
+  assert.equal(services[1].env.BRC_RUNTIME_SHUTDOWN_TIMEOUT_MS, '6789');
+  assert.equal(services[0].env.BRC_LOG_ROTATE_MIB, '2');
+  assert.equal(services[1].env.BRC_LOG_ROTATE_MIB, '2');
+  assert.equal(services[2].env.BRC_LOG_ROTATE_MIB, '2');
   assert.deepEqual(services[1].args, ['--run-traefik']);
   assert.equal(services[2].env.BRC_RELAY, 'http://127.0.0.1:13001');
 });
@@ -291,17 +547,75 @@ function httpStatus(port, pathname, options = {}) {
       response.resume();
       response.once('end', () => resolve(response.statusCode));
     });
+    req.setTimeout(5_000, () => req.destroy(new Error(`HTTP request timed out: ${pathname}`)));
     req.once('error', reject);
     req.end();
   });
 }
+function httpHeader(port, pathname, headerName) {
+  return new Promise((resolve, reject) => {
+    const req = request({
+      host: '127.0.0.1',
+      port,
+      method: 'GET',
+      path: pathname,
+      agent: false,
+    }, (response) => {
+      response.resume();
+      response.once('end', () => resolve(response.headers[headerName.toLowerCase()]));
+    });
+    req.setTimeout(5_000, () => req.destroy(new Error(`HTTP request timed out: ${pathname}`)));
+    req.once('error', reject);
+    req.end();
+  });
+}
+test('config apply rejects when Traefik keeps serving an older dynamic generation', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const health = createServer((_request, response) => {
+    response.writeHead(200, { 'X-BRC-Config-Generation': 'stale' }).end();
+  });
+  const healthPort = await listen(health);
+  t.after(() => new Promise((resolve, reject) => health.close((error) => error ? reject(error) : resolve())));
+
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.services.healthPort = healthPort;
+  settings.runtime.startupTimeoutMs = 100;
+  const lifecycle = makeLifecycle();
+  lifecycle.state.service = 'running';
+  const manager = makeManager(brcPaths, makeRelease('3.7.16'), { settings, lifecycle });
+
+  await assert.rejects(manager.writeConfig(settings), /dynamic configuration.*timeout/i);
+});
+
+test('config-generation probe enforces total deadline while response keeps streaming', async (t) => {
+  const health = createServer((_request, response) => {
+    response.writeHead(200, { 'X-BRC-Config-Generation': 'stale' });
+    response.write('x');
+    const drip = setInterval(() => response.write('x'), 20);
+    const finish = setTimeout(() => response.end(), 400);
+    response.once('close', () => {
+      clearInterval(drip);
+      clearTimeout(finish);
+    });
+  });
+  const healthPort = await listen(health);
+  t.after(() => new Promise((resolve, reject) => health.close((error) => error ? reject(error) : resolve())));
+
+  const startedAt = Date.now();
+  await assert.rejects(waitForConfigGeneration([healthPort], 'current', 120), /dynamic configuration.*timeout/i);
+  assert.ok(Date.now() - startedAt < 300, 'the complete probe must stay within its total deadline.');
+});
+
 
 async function websocketStatus(port, pathname = '/ws', headers = {}) {
   const socket = createConnection({ host: '127.0.0.1', port });
   const key = randomBytes(16).toString('base64');
   const status = await new Promise((resolve, reject) => {
     let response = '';
-    const timeout = setTimeout(() => reject(new Error('WebSocket handshake timed out.')), 5000);
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`WebSocket handshake timed out: ${pathname}`));
+    }, 5_000);
     socket.once('error', (error) => { clearTimeout(timeout); reject(error); });
     socket.on('data', (chunk) => {
       response += chunk.toString('latin1');
@@ -327,7 +641,20 @@ async function websocketStatus(port, pathname = '/ws', headers = {}) {
 
 const realTraefikSkip = TEST_BINARY ? false : 'Set BRC_TRAEFIK_TEST_BINARY to an official Traefik v3.7+ executable.';
 test('official Traefik routes all paths and shares global rate and in-flight limits', { skip: realTraefikSkip }, async (t) => {
-  const { paths: brcPaths } = await makeRoot(t);
+  const { root, paths: brcPaths } = await makeRoot(t, { cleanup: false });
+  let backend;
+  let serviceManager;
+  const backendSockets = new Set();
+  t.after(async () => {
+    let stopError;
+    if (serviceManager) {
+      try { await serviceManager.stop(); } catch (error) { stopError = error; }
+    }
+    for (const socket of backendSockets) socket.destroy();
+    if (backend?.listening) await new Promise((resolve) => backend.close(resolve));
+    if (stopError) throw stopError;
+    await rm(root, { recursive: true, force: true });
+  });
   const versionResult = spawnSync(TEST_BINARY, ['version'], { encoding: 'utf8', windowsHide: true });
   assert.equal(versionResult.status, 0, versionResult.stderr);
   const version = versionResult.stdout.match(/Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
@@ -347,13 +674,17 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
   let active = 0;
   let peak = 0;
   let webSockets = 0;
-  const backend = createServer((req, res) => {
+  backend = createServer((req, res) => {
     active++;
     peak = Math.max(peak, active);
     events.push({ path: req.url, host: req.headers.host, key: req.headers['x-brc-limit-key'], xff: req.headers['x-forwarded-for'] });
     res.once('close', () => { active--; });
     const delay = Number(new URL(req.url, 'http://localhost').searchParams.get('hold') ?? 0);
     setTimeout(() => { if (!res.destroyed) res.writeHead(204).end(); }, delay);
+  });
+  backend.on('connection', (socket) => {
+    backendSockets.add(socket);
+    socket.once('close', () => backendSockets.delete(socket));
   });
   backend.on('upgrade', (req, socket) => {
     active++;
@@ -365,6 +696,7 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     const release = () => { active--; webSockets--; };
     socket.once('close', release);
+    socket.on('end', () => socket.end());
     socket.on('data', (data) => {
       if ((data[0] & 0x0f) === 0x8) socket.end(Buffer.from([0x88, 0]));
     });
@@ -376,25 +708,54 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
     BRC_TRAEFIK_PORT: String(proxyPort),
     BRC_TRAEFIK_HEALTH_PORT: String(healthPort),
   };
-  const manager = new TraefikManager(brcPaths, { env });
-  await manager.writeConfig();
-
-  const dynamicFile = path.join(brcPaths.traefik, 'config', 'dynamic.yml');
-  const rateOnly = (await readFile(dynamicFile, 'utf8')).replace('amount: 16', 'amount: 100');
-  await writeFile(dynamicFile, rateOnly);
-  const services = createDefaultServices(brcPaths, env);
+  const settings = settingsFor(env);
+  const services = createDefaultServices(brcPaths, settings, env);
+  settings.proxy.concurrent = 100;
   const traefikSpec = services.find((service) => service.name === 'traefik');
   assert.ok(traefikSpec);
   const processManager = new ProcessManager(brcPaths, { startupTimeoutMs: 20_000, shutdownTimeoutMs: 3_000, pollIntervalMs: 50 });
-  const serviceManager = new ServiceManager(brcPaths, [traefikSpec], processManager);
-  t.after(async () => {
-    try { await serviceManager.stop(); } catch { /* Preserve the assertion failure. */ }
-    await new Promise((resolve) => backend.close(resolve));
-  });
+  serviceManager = new ServiceManager(brcPaths, [traefikSpec], processManager);
+  const manager = new TraefikManager(brcPaths, settings, serviceManager);
+  await manager.writeConfig();
 
   await serviceManager.start();
   assert.equal(await httpStatus(healthPort, '/ping'), 200);
+  const initialGeneration = await httpHeader(healthPort, '/ping', 'x-brc-config-generation');
+  assert.ok(initialGeneration, 'loopback health must report the active dynamic config generation.');
+  await manager.writeConfig(settings);
+  const appliedGeneration = await httpHeader(healthPort, '/ping', 'x-brc-config-generation');
+  assert.notEqual(appliedGeneration, initialGeneration, 'config apply must wait until the running Traefik loads the new generation.');
+  const nextRelayPort = (await reservePorts(1))[0];
+  const nextSettings = structuredClone(settings);
+  nextSettings.services.relayPort = nextRelayPort;
+  await serviceManager.withLock(() => manager.writeConfigWithLockHeld(nextSettings, settings));
+  assert.equal(
+    await httpStatus(proxyPort, '/relay-port-pending'),
+    204,
+    'a pending Relay port change must not redirect live Traefik traffic before Relay restarts.',
+  );
+  let dynamic = yaml.load(await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8'));
+  assert.equal(dynamic.http.services.backend.loadBalancer.servers[0].url, `http://127.0.0.1:${relayPort}`);
+  await serviceManager.withLock(() => manager.writeConfigWithLockHeld(settings, settings));
+  assert.equal(await httpStatus(proxyPort, '/relay-port-rollback'), 204);
+  dynamic = yaml.load(await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8'));
+  assert.equal(dynamic.http.services.backend.loadBalancer.servers[0].url, `http://127.0.0.1:${relayPort}`);
+  await serviceManager.withLock(async (operations) => {
+    await operations.stop();
+    await manager.writeConfigWithLockHeld(nextSettings);
+    dynamic = yaml.load(await readFile(path.join(brcPaths.traefik, 'config', 'dynamic.yml'), 'utf8'));
+    assert.equal(dynamic.http.services.backend.loadBalancer.servers[0].url, `http://127.0.0.1:${nextRelayPort}`);
+    await operations.start();
+  });
+  await serviceManager.withLock(async (operations) => {
+    await operations.stop();
+    await manager.writeConfigWithLockHeld(settings);
+    await operations.start();
+  });
+  assert.equal(await httpStatus(proxyPort, '/relay-port-restored'), 204);
   await sleep(3200);
+  events.length = 0;
+  const burstStartedAt = Date.now();
   const burst = await Promise.all(Array.from({ length: 50 }, (_, index) => httpStatus(proxyPort, ['/oauth/callback', '/mcp', '/health'][index % 3], {
     localAddress: index % 2 === 0 ? '127.0.0.1' : '127.0.0.2',
     headers: {
@@ -403,35 +764,49 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
       'X-BRC-Limit-Key': `spoof-${index}`,
     },
   })));
-  assert.equal(burst.filter((code) => code === 204).length, 30);
-  assert.equal(burst.filter((code) => code === 429).length, 20);
-  assert.equal(events.filter((event) => event.key === 'global-v1').length, 30);
+  const burstDurationMs = Date.now() - burstStartedAt;
+  const accepted = burst.filter((code) => code === 204).length;
+  const rejected = burst.filter((code) => code === 429).length;
+  assert.equal(settings.proxy.rate.period, '1s');
+  const maxAccepted = settings.proxy.rate.burst + Math.ceil(settings.proxy.rate.average * burstDurationMs / 1_000);
+  assert.ok(accepted >= settings.proxy.rate.burst, `Initial burst was not available: ${accepted}/${burst.length} accepted.`);
+  assert.ok(accepted <= maxAccepted, `${accepted} accepted in ${burstDurationMs} ms; expected at most ${maxAccepted}.`);
+  assert.equal(rejected, burst.length - accepted);
+  assert.ok(rejected > 0, 'The shared rate limit must reject requests in this burst.');
+  assert.equal(events.length, accepted);
   assert.ok(events.every((event) => event.key === 'global-v1'));
-  assert.ok(events.some((event) => event.xff?.includes('198.51.100.')));
+  const forwardedSources = new Set(events.map((event) => event.xff));
+  assert.deepEqual([...forwardedSources].sort(), ['127.0.0.1', '127.0.0.2']);
+  assert.ok(events.every((event) => !event.xff?.includes('198.51.100.')), 'Traefik must ignore untrusted client X-Forwarded-For values.');
 
   await serviceManager.stop();
+  settings.proxy.concurrent = 16;
   await manager.writeConfig();
   await serviceManager.start();
   await sleep(3200);
+  assert.equal(active, 0, 'Rate-limit requests must finish before measuring concurrent connections.');
+  peak = 0;
   const fourSockets = await Promise.all(Array.from({ length: 4 }, () => websocketStatus(proxyPort)));
   assert.ok(fourSockets.every((result) => result.status === 101));
   const mixed = await Promise.all(Array.from({ length: 13 }, () => httpStatus(proxyPort, '/mcp?hold=300')));
   assert.equal(mixed.filter((code) => code === 204).length, 12);
   assert.equal(mixed.filter((code) => code === 429).length, 1);
   assert.equal(peak, 16);
-  for (const result of fourSockets) result.socket.destroy();
+  for (const result of fourSockets) result.socket.end();
   await sleep(100);
 
   await sleep(3200);
+  assert.equal(active, 0, 'Previous HTTP requests and WebSockets must finish before the next burst.');
+  assert.equal(webSockets, 0, 'Earlier WebSockets must release their in-flight slots.');
   const seventeenSockets = await Promise.all(Array.from({ length: 17 }, () => websocketStatus(proxyPort)));
   assert.equal(seventeenSockets.filter((result) => result.status === 101).length, 16);
   assert.equal(seventeenSockets.filter((result) => result.status === 429).length, 1);
-  for (const result of seventeenSockets) result.socket.destroy();
+  for (const result of seventeenSockets) result.socket.end();
   await sleep(100);
 
   assert.equal(await httpStatus(proxyPort, '/oauth/callback?code=abc&state=xyz'), 204);
   assert.equal(await httpStatus(proxyPort, '/mcp'), 204);
-  assert.equal(await websocketStatus(proxyPort, '/ws').then((result) => { result.socket.destroy(); return result.status; }), 101);
+  assert.equal(await websocketStatus(proxyPort, '/ws').then((result) => { result.socket.end(); return result.status; }), 101);
   assert.equal(await httpStatus(proxyPort, '/oauth%2Fcallback'), 400);
   assert.equal(await httpStatus(proxyPort, '/mcp', { headers: { 'X.Auth.User': 'spoofed' } }), 400);
   assert.equal(webSockets, 0);

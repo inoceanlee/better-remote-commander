@@ -102,6 +102,28 @@ export class SettingsManager {
   entries(): SettingEntry[] {
     return BRC_SETTING_KEYS.map((key) => ({ ...this.get(key), key }));
   }
+  snapshot(): Readonly<BrcSettings> {
+    return this.loaded.settings;
+  }
+
+  async ensureConfigFile(): Promise<void> {
+    await this.dependencies.lock.runExclusive(async () => {
+      if (this.loaded.rawContents !== null) return;
+      const current = await readSettings(this.paths, this.env);
+      if (current.rawContents !== null) {
+        this.loaded = current;
+        return;
+      }
+
+      const contents = await writeSettings(this.paths, current.fileSettings);
+      const initialized = { ...current, rawContents: contents };
+      await writeLastGoodText(this.paths, contents);
+      this.loaded = initialized;
+      this.lastGood = initialized;
+    });
+  }
+
+
 
   async set<K extends BrcSettingKey>(key: K, value: BrcSettingValues[K]): Promise<{ restartRequired: boolean }> {
     if (!isBrcSettingKey(key)) throw new Error(`Unknown setting: ${String(key)}`);
@@ -122,7 +144,7 @@ export class SettingsManager {
         await this.dependencies.apply(next.settings, previous.settings);
         await writeLastGoodText(this.paths, contents);
       } catch (error) {
-        await this.rollback(previous, error, nextLoaded);
+        await this.rollback(previous, error, true);
       }
       this.loaded = nextLoaded;
       this.lastGood = nextLoaded;
@@ -145,7 +167,7 @@ export class SettingsManager {
         if (next.rawContents === null) await removeLastGoodFile(this.paths);
         else await writeLastGoodText(this.paths, next.rawContents);
       } catch (error) {
-        await this.rollback(previous, error, next);
+        await this.rollback(previous, error, true);
       }
       this.loaded = next;
       this.lastGood = next.rawContents === null ? null : next;
@@ -153,11 +175,11 @@ export class SettingsManager {
     });
   }
 
-  private async rollback(previous: LoadedSettings, cause: unknown, attempted?: LoadedSettings): Promise<never> {
+  private async rollback(previous: LoadedSettings, cause: unknown, restoreRuntime = false): Promise<never> {
     const failures: unknown[] = [cause];
-    if (attempted) {
+    if (restoreRuntime) {
       try {
-        await this.dependencies.apply(previous.settings, attempted.settings);
+        await this.dependencies.apply(previous.settings, previous.settings);
       } catch (error) {
         failures.push(error);
       }

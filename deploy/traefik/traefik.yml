@@ -18,6 +18,7 @@ entryPoints:
       aliasHeadersStrategy: reject
 ping:
   entryPoint: health
+  manualRouting: true
 providers:
   file:
     filename: @@BRC_DYNAMIC_FILE@@

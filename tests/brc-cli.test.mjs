@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,10 +13,11 @@ const pathsEntry = fileURLToPath(new URL('../packages/cli/dist/config/paths.js',
 const pathsUrl = JSON.stringify(pathToFileURL(pathsEntry).href);
 
 function runCliProcess(args, dataRoot = path.join(os.tmpdir(), 'brc-cli-process-test'), extraEnv = {}) {
+  const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_')));
   return spawnSync(process.execPath, [cliEntry, ...args], {
     encoding: 'utf8',
     windowsHide: true,
-    env: { ...process.env, ...extraEnv, BRC_DATA_ROOT: dataRoot },
+    env: { ...inheritedEnv, ...extraEnv, BRC_DATA_ROOT: dataRoot },
   });
 }
 
@@ -59,6 +60,35 @@ test('help explains package-only removal and full uninstall', () => {
   assert.match(result.stdout, /pnpm remove -g @inoceanlee\/brc/);
   assert.match(result.stdout, /brc uninstall/);
 });
+test('non-interactive uninstall requires --yes and preserves private data', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-uninstall-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'data', 'private.sqlite');
+  await mkdir(path.dirname(marker), { recursive: true });
+  await writeFile(marker, 'isolated database');
+
+  const result = runCliProcess(['uninstall'], root);
+
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /--yes/);
+  assert.equal(await readFile(marker, 'utf8'), 'isolated database');
+});
+
+test('CLI entrypoint runs through a directory junction', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-junction-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const alias = path.join(root, 'alias');
+  await symlink(path.dirname(cliEntry), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_')));
+  const result = spawnSync(process.execPath, [path.join(alias, path.basename(cliEntry)), 'help'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: { ...inheritedEnv, BRC_DATA_ROOT: path.join(root, 'data') },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /BRC unified CLI/);
+});
 
 test('unknown commands return usage error', () => {
   const result = runCliProcess(['unknown']);
@@ -78,6 +108,44 @@ console.log(JSON.stringify({ exitCode, calls }));
 
   assert.equal(result.exitCode, 2);
   assert.deepEqual(result.calls, []);
+});
+test('uninstall accepts --yes and owns its stop-clean-remove ordering', () => {
+  const result = probeResult(runProbe(`
+const calls = [];
+let cleanCount = 0;
+const paths = { root: 'root', traefik: 'traefik', config: 'config', data: 'data', runtime: 'runtime', logs: 'logs', tmp: 'tmp' };
+const commands = {
+  uninstall: async ({ yes }, clean) => {
+    calls.push(['uninstall', yes]);
+    await clean();
+    calls.push('remove package');
+    return 0;
+  },
+};
+const exitCode = await runCli(['uninstall', '--yes'], { paths, commands, clean: async () => { cleanCount++; calls.push('clean'); }, write: () => {}, writeError: () => {} });
+console.log(JSON.stringify({ exitCode, cleanCount, calls }));
+`));
+
+  assert.deepEqual(result, {
+    exitCode: 0,
+    cleanCount: 1,
+    calls: [['uninstall', true], 'clean', 'remove package'],
+  });
+});
+
+test('failed uninstall does not run automatic cleanup out of order', () => {
+  const result = probeResult(runProbe(`
+let cleanCount = 0;
+const errors = [];
+const paths = { root: 'root', traefik: 'traefik', config: 'config', data: 'data', runtime: 'runtime', logs: 'logs', tmp: 'tmp' };
+const commands = { uninstall: async () => { throw new Error('service stop failed'); } };
+const exitCode = await runCli(['uninstall', '--yes'], { paths, commands, clean: async () => { cleanCount++; }, write: () => {}, writeError: (message) => errors.push(message) });
+console.log(JSON.stringify({ exitCode, cleanCount, errors }));
+`));
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.cleanCount, 0);
+  assert.match(result.errors.join('\\n'), /service stop failed/);
 });
 
 test('command exit code survives one cleanup failure', () => {
@@ -151,4 +219,16 @@ console.log(JSON.stringify(paths));
     tmp: path.join(root, 'tmp'),
   });
   for (const value of Object.values(result)) assert.equal(path.isAbsolute(value), true);
+});
+
+test('config set persists validated settings in the selected data root', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-config-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const result = runCliProcess(['config', 'set', 'proxy.rate.average', '20'], root);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /proxy\.rate\.average = 20/);
+  const config = await readFile(path.join(root, 'config', 'brc.yaml'), 'utf8');
+  assert.match(config, /average: 20/);
 });

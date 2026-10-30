@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "brc-shared": "workspace:*",
+    "js-yaml": "^3.15.2",
     "unzipper": "^0.10.14"
   },
   "engines": {
