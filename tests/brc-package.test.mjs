@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { SqliteStore } from '../packages/relay/dist/store/sqlite.js';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -69,6 +71,15 @@ async function waitForRemovalReport(filename) {
   throw new Error(`Timed out waiting for uninstall worker report: ${filename}`);
 }
 
+function readAdminUserId(filename) {
+  const store = SqliteStore.open(filename);
+  try {
+    return store.upsertUser('admin', 'isolated-package-test-password').id;
+  } finally {
+    store.close();
+  }
+}
+
 const testTraefikBinary = process.env.BRC_TRAEFIK_TEST_BINARY;
 
 async function stageTraefikTestBinary(dataRoot) {
@@ -92,11 +103,16 @@ async function updateAndStopBrc(dataRoot, root, bin, env, updatedPackage) {
   const dataMarker = path.join(dataRoot, 'data', 'private.sqlite');
   await mkdir(path.dirname(dataMarker), { recursive: true });
   await writeFile(dataMarker, 'isolated test database');
+  const relayDatabase = path.join(dataRoot, 'data', 'relay.sqlite');
+  const userIdBefore = existsSync(relayDatabase) ? readAdminUserId(relayDatabase) : null;
   run(pnpmCommand, ['add', '--global', '--offline', updatedPackage.tarball], { cwd: root, env });
   const packages = run(pnpmCommand, ['list', '--global', '--depth', '-1', '--json'], { cwd: root, env });
   assert.ok(packages.includes('@inoceanlee/brc'));
   assert.ok(packages.includes(updatedPackage.version), `global update did not install ${updatedPackage.version}: ${packages}`);
   assert.equal(await readFile(dataMarker, 'utf8'), 'isolated test database');
+  if (userIdBefore !== null) {
+    assert.equal(readAdminUserId(relayDatabase), userIdBefore, 'Updating the global CLI package must preserve the Relay user ID.');
+  }
   const status = run(bin, ['status'], { cwd: root, env });
   assert.match(status, /relay:/);
   run(bin, ['stop'], { cwd: root, env });

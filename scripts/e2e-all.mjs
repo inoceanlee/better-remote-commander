@@ -5,19 +5,40 @@ import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
+import { DEFAULT_SETTINGS } from '../packages/cli/dist/config/settings.js';
+import { TraefikManager } from '../packages/cli/dist/traefik/manager.js';
 
-async function availablePort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('Could not select a loopback port for e2e.');
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  return address.port;
+async function reservePorts(count, excluded = new Set()) {
+  const servers = [];
+  const ports = [];
+  try {
+    while (ports.length < count) {
+      const server = createServer();
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Could not select a loopback port for e2e.');
+      if (excluded.has(address.port) || ports.includes(address.port)) {
+        await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        continue;
+      }
+      servers.push(server);
+      ports.push(address.port);
+    }
+  } finally {
+    await Promise.all(servers.map((server) => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })));
+  }
+  return ports;
 }
-const PORT = Number(process.env.E2E_PORT ?? await availablePort());
+const USE_TRAEFIK = Boolean(process.env.BRC_TRAEFIK_TEST_BINARY);
+const PORT = Number(process.env.E2E_PORT ?? (await reservePorts(1))[0]);
+const [RELAY_PORT, HEALTH_PORT] = USE_TRAEFIK
+  ? await reservePorts(2, new Set([PORT]))
+  : [PORT, undefined];
 const base = `http://127.0.0.1:${PORT}`;
 const pass = 'e2e-pass-' + Math.random().toString(36).slice(2, 8);
 // realpath: Windows runners hand out 8.3 short paths (RUNNER~1) which crash libuv's fs.watch
@@ -27,8 +48,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relayCli = path.resolve('packages/relay/dist/cli.js');
 const agentCli = path.resolve('packages/agent/dist/cli.js');
 
-function start(name, args, env) {
-  const p = spawn(process.execPath, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+function start(name, args, env, executable = process.execPath) {
+  const p = spawn(executable, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   p.out = '';
   p.stdout.on('data', (d) => { p.out += d; if (process.env.E2E_VERBOSE) process.stdout.write(`[${name}] ${d}`); });
   p.stderr.on('data', (d) => { p.out += d; if (process.env.E2E_VERBOSE) process.stderr.write(`[${name}] ${d}`); });
@@ -60,7 +81,7 @@ function runScript(script, ...args) {
 let failed = 0;
 try {
   const relayEnv = {
-    PORT: String(PORT),
+    PORT: String(RELAY_PORT),
     HOST: '127.0.0.1',
     PUBLIC_URL: base,
     BRC_ADMIN_PASSWORD: pass,
@@ -70,6 +91,33 @@ try {
     BRC_LOG_ROTATE_MIB: '1',
     LOG_LEVEL: 'warn',
   };
+  if (USE_TRAEFIK) {
+    const paths = {
+      root: scratch,
+      traefik: path.join(scratch, 'traefik'),
+      config: path.join(scratch, 'config'),
+      data: path.join(scratch, 'data'),
+      runtime: path.join(scratch, 'runtime'),
+      logs: path.join(scratch, 'logs'),
+      tmp: path.join(scratch, 'tmp'),
+    };
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.services.relayPort = RELAY_PORT;
+    settings.services.proxyPort = PORT;
+    settings.services.healthPort = HEALTH_PORT;
+    settings.proxy.rate.average = 5000;
+    settings.proxy.rate.burst = 5000;
+    settings.proxy.concurrent = 100;
+    const manager = new TraefikManager(paths, settings, {
+      status: async () => [],
+      withLock: (operation) => operation({}),
+    });
+    await manager.writeConfig();
+    const traefikConfig = path.join(paths.traefik, 'config', 'traefik.yml');
+    start('traefik', ['--configFile', traefikConfig], {}, realpathSync.native(process.env.BRC_TRAEFIK_TEST_BINARY));
+    await waitFor(async () => (await fetch(`http://127.0.0.1:${HEALTH_PORT}/ping`)).ok, 20_000, 'Traefik health');
+    console.log(`official Traefik routes isolated E2E traffic through ${base}`);
+  }
   const initialized = spawnSync(process.execPath, [relayCli, '--initialize'], {
     env: { ...process.env, ...relayEnv },
     encoding: 'utf8',
@@ -89,13 +137,13 @@ try {
   r = await fetch(`${base}/device/approve`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ user_code: code, decision: 'allow' }) });
   if (r.status !== 200) throw new Error(`approve failed: ${r.status}`);
   await waitFor(async () => (await (await fetch(`${base}/health`)).json()).devices === 1, 20_000, 'agent online');
-  console.log(`relay + agent up on ${base} (pairing code ${code})\n`);
+  console.log(`${USE_TRAEFIK ? 'Relay and Agent are reachable through isolated Traefik' : 'relay + agent up'} on ${base} (pairing code ${code})\n`);
   relay.kill('SIGTERM');
   await waitFor(() => relay.exitCode !== null || relay.signalCode !== null, 5000, 'relay shutdown');
   start('relay', [relayCli], relayEnv);
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay restart');
   await waitFor(async () => (await (await fetch(`${base}/health`)).json()).devices === 1, 20_000, 'agent reconnect after relay restart');
-  console.log('Agent reconnected after Relay restart with existing database identity.');
+  console.log(`${USE_TRAEFIK ? 'Agent WebSocket reconnected through Traefik' : 'Agent reconnected'} after Relay restart with existing database identity.`);
 
   // rate-limit test must run last: it locks the admin login for 5 minutes.
   for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-admin.mjs']) {

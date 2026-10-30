@@ -70,6 +70,24 @@ step('mcp list_devices', devJson.devices?.some((d) => d.online), JSON.stringify(
 const call = await rpc('tools/call', { name: 'start_process', arguments: { command: 'echo brc-mcp-ok', timeout_ms: 8000 } }, 4);
 const out = call.body?.result?.content?.[0]?.text ?? '';
 step('mcp start_process via device', out.includes('brc-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
+const longStartedAt = Date.now();
+const longCall = await rpc('tools/call', {
+  name: 'start_process',
+  arguments: { command: `node -e "setTimeout(() => console.log('BRC_LONG_REQUEST_OK'), 2500)"`, timeout_ms: 10_000 },
+}, 5);
+const longText = longCall.body?.result?.content?.[0]?.text ?? '';
+const longDurationMs = Date.now() - longStartedAt;
+step('mcp long request via Agent WebSocket', longCall.status === 200 && !longCall.body?.result?.isError
+  && longText.includes('BRC_LONG_REQUEST_OK') && longDurationMs >= 2000, `duration=${longDurationMs}ms`);
+
+const largeCall = await rpc('tools/call', {
+  name: 'start_process',
+  arguments: { command: `node -e "process.stdout.write('BRC_LARGE_BEGIN' + 'x'.repeat(256 * 1024) + 'BRC_LARGE_END')"`, timeout_ms: 10_000 },
+}, 6);
+const largeText = largeCall.body?.result?.content?.[0]?.text ?? '';
+step('mcp large response via Agent WebSocket', largeCall.status === 200 && !largeCall.body?.result?.isError
+  && largeText.length >= 256 * 1024 && largeText.includes('BRC_LARGE_BEGIN') && largeText.includes('BRC_LARGE_END'),
+  `chars=${largeText.length}`);
 const redirect2 = 'https://claude.ai/api/mcp/auth_callback';
 const reg2 = await j(await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ client_name: 'Second BRC client', redirect_uris: [redirect2], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }) }));
@@ -84,7 +102,7 @@ const allowed2 = await fetch(`${base}/auth/consent`, { method: 'POST', redirect:
 const code2 = new URL(allowed2.headers.get('location')).searchParams.get('code');
 const tok2 = await j(await fetch(meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({ grant_type: 'authorization_code', code: code2, code_verifier: verifier2, client_id: reg2.client_id, redirect_uri: redirect2, resource: prm.resource }) }));
-const devs2 = await rpc('tools/call', { name: 'list_devices', arguments: {} }, 5, { ...H, authorization: `Bearer ${tok2.access_token}` });
+const devs2 = await rpc('tools/call', { name: 'list_devices', arguments: {} }, 7, { ...H, authorization: `Bearer ${tok2.access_token}` });
 const devices2 = JSON.parse(devs2.body?.result?.content?.[0]?.text ?? '{}').devices ?? [];
 const stableDevices = (devices) => devices.map(({ deviceId, name, platform, online, paused }) => ({ deviceId, name, platform, online, paused })).sort((a, b) => a.deviceId.localeCompare(b.deviceId));
 step('second OAuth client sees same devices', consent2.status === 200 && !!tok2.access_token && JSON.stringify(stableDevices(devices2)) === JSON.stringify(stableDevices(devJson.devices)), JSON.stringify(devices2.map((device) => device.name)));
