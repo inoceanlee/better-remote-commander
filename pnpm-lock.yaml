@@ -136,6 +136,8 @@ importers:
         specifier: ^8.5.12
         version: 8.18.1
 
+  packages/cli: {}
+
   packages/relay:
     dependencies:
       '@modelcontextprotocol/sdk':
