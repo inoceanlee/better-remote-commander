@@ -8,7 +8,10 @@
     "brc": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "deploy",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json"
