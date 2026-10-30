@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto';
-import { applyLegacyEnv } from 'brc-shared';
+import { once } from 'node:events';
+import { applyLegacyEnv, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 applyLegacyEnv();
 import { buildRelay, loadConfig } from './app.js';
 
@@ -17,11 +18,33 @@ const log = (level: string, msg: string) => {
 };
 
 const relay = buildRelay(cfg, log);
-relay.http.listen(cfg.port, cfg.host, () => {
-  log('info', `brc-relay ${cfg.relayVersion} listening on ${cfg.host}:${cfg.port}`);
-  log('info', `public URL ${cfg.publicUrl}  MCP: ${cfg.publicUrl}/mcp  pair: ${cfg.publicUrl}/device/verify`);
-});
+const listening = once(relay.http, 'listening');
+relay.http.listen(cfg.port, cfg.host);
+await listening;
+log('info', `brc-relay ${cfg.relayVersion} listening on ${cfg.host}:${cfg.port}`);
+log('info', `public URL ${cfg.publicUrl}  MCP: ${cfg.publicUrl}/mcp  pair: ${cfg.publicUrl}/device/verify`);
 
-const stop = async () => { log('info', 'shutting down'); await relay.close(); process.exit(0); };
-process.on('SIGINT', stop);
-process.on('SIGTERM', stop);
+let control: ManagedControlServer | undefined;
+let stopping = false;
+const stop = async (sig?: string) => {
+  if (stopping) return;
+  stopping = true;
+  if (sig) log('info', `${sig} received, shutting down`);
+  await control?.close();
+  await relay.close();
+};
+process.on('SIGINT', () => { void stop('SIGINT').catch((error: unknown) => log('error', String(error))); });
+process.on('SIGTERM', () => { void stop('SIGTERM').catch((error: unknown) => log('error', String(error))); });
+control = await startManagedControlServer({
+  health: async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${cfg.port}/health`);
+      return response.ok
+        ? { state: 'running', detail: 'Relay health endpoint is ready.' }
+        : { state: 'degraded', detail: `Relay health returned HTTP ${response.status}.` };
+    } catch {
+      return { state: 'degraded', detail: 'Relay health endpoint is unavailable.' };
+    }
+  },
+  stop: () => stop(),
+});

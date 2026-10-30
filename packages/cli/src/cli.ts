@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 import { resolveBrcPaths, type BrcPaths } from './paths.js';
+import { createDefaultServices, ServiceManager } from './services.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -154,16 +155,33 @@ const unavailable = async (): Promise<number> => {
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
+  const serviceManager = new ServiceManager(paths, createDefaultServices(paths));
   const deps: CliDependencies = {
     paths,
     commands: {
       setup: unavailable,
-      start: unavailable,
-      stop: unavailable,
-      restart: unavailable,
-      status: async () => {
-        console.log('BRC services: stopped.');
+      start: async () => {
+        await serviceManager.start();
+        console.log('BRC services started.');
         return 0;
+      },
+      stop: async () => {
+        await serviceManager.stop();
+        console.log('BRC services stopped.');
+        return 0;
+      },
+      restart: async () => {
+        await serviceManager.restart();
+        console.log('BRC services restarted.');
+        return 0;
+      },
+      status: async () => {
+        const statuses = await serviceManager.status();
+        for (const status of statuses) {
+          const pid = status.pid === null ? '' : ` PID ${status.pid}`;
+          console.log(`${status.name}: ${status.state}${pid} — ${status.detail}`);
+        }
+        return statuses.some((status) => status.state === 'degraded') ? 1 : 0;
       },
       logs: unavailable,
       updateTraefik: unavailable,

@@ -39,6 +39,10 @@ export class WsClient {
     this.wsUrl = WsClient.toWsUrl(opts.relayUrl);
   }
 
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   static toWsUrl(relayUrl: string): string {
     const u = new URL(relayUrl);
     u.protocol = u.protocol === 'https:' ? 'wss:' : u.protocol === 'http:' ? 'ws:' : u.protocol;

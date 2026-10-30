@@ -7,7 +7,7 @@
  * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG
  */
 import os from 'node:os';
-import { applyLegacyEnv } from 'brc-shared';
+import { applyLegacyEnv, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 applyLegacyEnv();
 import { WsClient } from './transport/ws-client.js';
 import { pairDevice, loadCredentials, clearCredentials, saveCredentials, type DeviceCredentials } from './transport/pairing.js';
@@ -109,6 +109,21 @@ const start = (c: DeviceCredentials) => {
 };
 start(creds);
 
-const shutdown = (sig: string) => { console.log(`\n${sig} received, stopping agent`); client.stop(); setTimeout(() => process.exit(0), 200); };
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+let control: ManagedControlServer | undefined;
+let stopping = false;
+const shutdown = async (sig?: string) => {
+  if (stopping) return;
+  stopping = true;
+  if (sig) console.log(`\n${sig} received, stopping agent`);
+  client.stop();
+  await control?.close();
+  setTimeout(() => process.exit(0), 200);
+};
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+control = await startManagedControlServer({
+  health: () => client.connected
+    ? { state: 'running', detail: 'Agent connected to Relay.' }
+    : { state: 'degraded', detail: 'Agent is not connected to Relay.' },
+  stop: () => shutdown(),
+});
