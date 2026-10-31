@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RelayDatabase } from '../packages/cli/dist/lifecycle/relay-database.js';
 import { buildRelay } from '../packages/relay/dist/app.js';
-import { SqliteStore, hashPassword, sha256 } from '../packages/relay/dist/store/sqlite.js';
+import { SqliteStore, hashPassword, verifyPassword, sha256 } from '../packages/relay/dist/store/sqlite.js';
 
 const legacySchema = `
 CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -272,6 +272,80 @@ test('setup initializes a fresh Relay identity once and rejects a missing databa
       reopened.close();
     }
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('first setup persists administrator hash and session key for subsequent password-free starts', () => {
+  const { directory, file } = tempDatabase();
+  const env = { ...process.env, BRC_DB: file };
+  delete env.BRC_ADMIN_PASSWORD;
+  const database = new RelayDatabase(file, {
+    entrypoint: path.resolve('packages/relay/dist/cli.js'),
+    cwd: process.cwd(),
+    env,
+  });
+  try {
+    database.initializeForNewRoot(true, { username: 'alice', password: 'test-private-password' });
+    const first = SqliteStore.open(file);
+    let userId;
+    let hash;
+    let secret;
+    try {
+      const user = first.getAdministrator();
+      userId = user.id;
+      hash = user.password_hash;
+      secret = first.getSessionSecret();
+      assert.equal(user.username, 'alice');
+      assert.equal(verifyPassword('test-private-password', hash), true);
+      assert.notEqual(hash, 'test-private-password');
+      assert.match(secret, /^[0-9a-f]{64}$/);
+      assert.throws(() => first.bootstrapAdministrator('mallory', 'new-password'), /already|initialized|complete/i);
+    } finally { first.close(); }
+
+    database.initializeForNewRoot(false);
+    const reopened = SqliteStore.open(file);
+    try {
+      assert.equal(reopened.getAdministrator().id, userId);
+      assert.equal(reopened.getAdministrator().password_hash, hash);
+      assert.equal(reopened.getSessionSecret(), secret);
+    } finally { reopened.close(); }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('browser login survives password-free Relay restart using the stored session secret', async () => {
+  const { directory, file } = tempDatabase();
+  SqliteStore.initialize(file);
+  const store = SqliteStore.open(file);
+  try { store.bootstrapAdministrator('alice', 'test-private-password'); }
+  finally { store.close(); }
+  const configWithoutSecrets = { ...config(file, ''), adminUser: 'ignored', adminPassword: '' };
+  let relay;
+  try {
+    relay = buildRelay(configWithoutSecrets, () => {});
+    const port = await listen(relay);
+    const response = await fetch(`http://127.0.0.1:${port}/auth/login`, {
+      method: 'POST',
+      body: new URLSearchParams({ username: 'alice', password: 'test-private-password', returnTo: '/admin' }),
+      redirect: 'manual',
+    });
+    assert.equal(response.status, 302);
+    const cookie = response.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie?.startsWith('brc_session='));
+    await relay.close();
+    relay = null;
+
+    relay = buildRelay(configWithoutSecrets, () => {});
+    const restartedPort = await listen(relay);
+    const home = await fetch(`http://127.0.0.1:${restartedPort}/admin`, {
+      headers: { cookie },
+      redirect: 'manual',
+    });
+    assert.equal(home.status, 200);
+  } finally {
+    await relay?.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

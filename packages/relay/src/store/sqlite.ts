@@ -250,6 +250,51 @@ export class SqliteStore {
   }
 
   /* ---------- users ---------- */
+  /** Initial provisioning: persist only a password hash and a stable session key. */
+  bootstrapAdministrator(username: string, password: string): void {
+    if (!username.trim() || password.length < 8) {
+      throw new Error('Administrator username and password (at least 8 characters) are required.');
+    }
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      if (this.bootstrapState() !== 'pending' || this.userCount() !== 0) {
+        throw new Error('Relay administrator is already initialized.');
+      }
+      const user: UserRow = {
+        id: randomToken(12),
+        username: username.trim(),
+        password_hash: hashPassword(password),
+        created_at: Date.now(),
+      };
+      this.db.prepare('INSERT INTO users VALUES (?,?,?,?)')
+        .run(user.id, user.username, user.password_hash, user.created_at);
+      this.db.prepare('INSERT INTO brc_meta (key, value) VALUES (?, ?)')
+        .run('session_secret', randomBytes(32).toString('hex'));
+      this.db.prepare('UPDATE brc_meta SET value = ? WHERE key = ?').run('complete', 'admin_bootstrap');
+      this.db.exec('COMMIT;');
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  getAdministrator(): UserRow {
+    const users = this.db.prepare('SELECT * FROM users LIMIT 2').all() as unknown as UserRow[];
+    if (this.bootstrapState() !== 'complete' || users.length !== 1) {
+      throw new Error('Relay administrator identity is missing or ambiguous; refusing to start.');
+    }
+    return users[0];
+  }
+
+  getSessionSecret(): string {
+    const row = this.db.prepare('SELECT value FROM brc_meta WHERE key = ?')
+      .get('session_secret') as { value: string } | undefined;
+    if (!row || !/^[0-9a-f]{64}$/.test(row.value)) {
+      throw new Error('Relay session secret is missing or invalid; refusing to start.');
+    }
+    return row.value;
+  }
+
   getUserByName(username: string): UserRow | undefined {
     return this.db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
   }

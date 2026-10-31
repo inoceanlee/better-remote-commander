@@ -52,9 +52,6 @@ export function createDefaultServices(
     TRUST_PROXY: 'false',
     BRC_DB: path.join(paths.data, 'relay.sqlite'),
     BRC_LOG_FILE: path.join(paths.logs, 'relay.log'),
-    BRC_ADMIN_USER: parentEnv.BRC_ADMIN_USER ?? 'admin',
-    ...(parentEnv.BRC_ADMIN_PASSWORD ? { BRC_ADMIN_PASSWORD: parentEnv.BRC_ADMIN_PASSWORD } : {}),
-    ...(parentEnv.BRC_SESSION_SECRET ? { BRC_SESSION_SECRET: parentEnv.BRC_SESSION_SECRET } : {}),
   };
   const traefikEnv: NodeJS.ProcessEnv = {
     ...baseEnv,

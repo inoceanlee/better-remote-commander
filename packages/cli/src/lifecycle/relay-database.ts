@@ -12,7 +12,7 @@ export class RelayDatabase {
     return existsSync(this.file);
   }
 
-  initializeForNewRoot(rootWasEmpty: boolean): void {
+  initializeForNewRoot(rootWasEmpty: boolean, administrator?: { username: string; password: string }): void {
     if (this.exists()) return;
     if (!rootWasEmpty) {
       throw new Error(`Relay database is missing at ${this.file}; refusing to create a replacement identity in an existing data root.`);
@@ -22,6 +22,7 @@ export class RelayDatabase {
       cwd: this.relay.cwd,
       env: { ...this.relay.env, BRC_DB: this.file },
       encoding: 'utf8',
+      input: administrator ? JSON.stringify(administrator) : '',
       timeout: 10_000,
       windowsHide: true,
     });

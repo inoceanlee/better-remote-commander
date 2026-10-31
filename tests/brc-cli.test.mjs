@@ -201,8 +201,17 @@ test('automatic cleanup runs after help, invalid commands, and startup failure',
   assert.notEqual(result.status, 0, result.stderr);
   assert.equal(existsSync(fixture.expiredLog), false);
   const relayLog = await readFile(path.join(fixture.root, 'logs', 'relay.log'), 'utf8');
-  assert.match(relayLog, /BRC_ADMIN_PASSWORD is required/);
+  assert.match(relayLog, /Relay administrator identity is missing or ambiguous/);
 });
+test('noninteractive first setup fails before creating a new identity', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-first-setup-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const result = runCliProcess(['setup'], root);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /interactive terminal.*administrator password/i);
+  assert.equal(existsSync(path.join(root, 'data', 'relay.sqlite')), false);
+});
+
 test('data-root override resolves isolated paths without using Agent BRC_HOME', () => {
   const override = path.join(os.tmpdir(), 'isolated-brc');
   const result = probeResult(runProbe(`

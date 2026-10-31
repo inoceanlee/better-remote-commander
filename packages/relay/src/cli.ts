@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { applyLegacyEnv, installManagedLog, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 applyLegacyEnv();
 const managedLog = installManagedLog();
@@ -11,6 +11,16 @@ const cfg = loadConfig();
 if (process.argv.includes('--initialize')) {
   try {
     SqliteStore.initialize(cfg.dbFile);
+    const input = process.stdin.isTTY ? '' : readFileSync(0, 'utf8').trim();
+    if (input) {
+      const administrator = JSON.parse(input) as { username?: unknown; password?: unknown };
+      if (typeof administrator.username !== 'string' || typeof administrator.password !== 'string') {
+        throw new Error('Invalid administrator setup input.');
+      }
+      const store = SqliteStore.open(cfg.dbFile);
+      try { store.bootstrapAdministrator(administrator.username, administrator.password); }
+      finally { store.close(); }
+    }
   } catch (error) {
     console.error(`Relay database initialization failed: ${error instanceof Error ? error.message : String(error)}`);
     await managedLog?.close();
@@ -19,22 +29,20 @@ if (process.argv.includes('--initialize')) {
   await managedLog?.close();
   process.exit(0);
 }
-if (!cfg.adminPassword) {
-  console.error('BRC_ADMIN_PASSWORD is required');
-  await managedLog?.close();
-  process.exit(2);
-}
-if (!cfg.sessionSecret) {
-  cfg.sessionSecret = randomBytes(32).toString('hex');
-  console.warn('BRC_SESSION_SECRET not set: using a random secret (browser sessions reset on restart)');
-}
 
 const log = (level: string, msg: string) => {
   const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
   (level === 'error' || level === 'warn' ? console.error : console.log)(line);
 };
 
-const relay = buildRelay(cfg, log);
+let relay: ReturnType<typeof buildRelay>;
+try {
+  relay = buildRelay(cfg, log);
+} catch (error) {
+  console.error(`Relay startup failed: ${error instanceof Error ? error.message : String(error)}`);
+  await managedLog?.close();
+  process.exit(1);
+}
 const listening = once(relay.http, 'listening');
 relay.http.listen(cfg.port, cfg.host);
 await listening;

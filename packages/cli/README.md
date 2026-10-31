@@ -12,12 +12,14 @@ CLI 只管理由它启动的服务。CLI 不管理 Tailscale Funnel。
 pnpm add -g @inoceanlee/brc
 ```
 
-首次使用时初始化配置并安装 Traefik：
+首次使用时初始化配置、管理员身份并安装 Traefik：
 
 ```powershell
 brc setup
 brc start
 ```
+
+首次执行 `brc setup` 会提示输入管理员用户名（默认 `admin`）与密码（输入时隐藏，至少 8 个字符）。密码仅以哈希形式保存在 Relay SQLite 数据库；会话密钥在首次初始化时生成并存入同一数据库。后续 `brc start` 和 `brc restart` 不再要求密码或会话密钥环境变量。非交互式首次初始化可以通过 `BRC_ADMIN_USER` 和 `BRC_ADMIN_PASSWORD` 环境变量传入一次性初始化值，启动服务不会继承这些变量。首次初始化完成后应清除临时环境变量。
 
 Node.js 版本必须为 22.13 或更高。
 
@@ -38,7 +40,7 @@ pnpm up -g @inoceanlee/brc --latest
 ```
 
 `brc start` 不会自动下载或升级 Traefik。只有 `brc setup` 和 `brc update traefik` 会检查官方稳定版。
-首次 `brc setup` 会在新数据根初始化 Relay 数据库。已有数据根缺少数据库时，`setup` 会拒绝新建；`start` 与 `restart` 也会拒绝启动。Relay 遇到管理员身份缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
+首次 `brc setup` 会在新数据根初始化 Relay 数据库和管理员身份。已有数据根缺少数据库时，`setup` 会拒绝新建；`start` 与 `restart` 也会拒绝启动。Relay 遇到管理员身份、会话密钥缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
 
 ## 升级与回退
 

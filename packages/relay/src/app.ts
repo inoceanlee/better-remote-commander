@@ -61,8 +61,18 @@ export interface Relay { http: HttpServer; hub: DeviceHub; store: SqliteStore; c
 
 export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) => void): Relay {
   const store = SqliteStore.open(cfg.dbFile);
-  const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
-  const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
+  let admin: ReturnType<SqliteStore['getAdministrator']>;
+  let sessionSecret: string;
+  try {
+    admin = cfg.adminPassword
+      ? store.upsertUser(cfg.adminUser, cfg.adminPassword)
+      : store.getAdministrator();
+    sessionSecret = cfg.sessionSecret || store.getSessionSecret();
+  } catch (error) {
+    store.close();
+    throw error;
+  }
+  const sessions = new Sessions(sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
   const publicUrl = new URL(cfg.publicUrl);
 
