@@ -44,6 +44,17 @@ test('progress runner captures child output and real progress updates', async ()
   assert.doesNotMatch(output.data, /\x1b\[2K/);
 });
 
+test('progress runner refreshes an interactive terminal while a step is active', async () => {
+  const output = { isTTY: true, data: '', write(text) { this.data += text; } };
+  const runner = new ReleaseProgress({ output, errorOutput: output });
+  await runner.step(1, 1, 'Working', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 280));
+  });
+  assert.match(output.data, /\r\x1b\[2K/);
+  assert.match(output.data, /⠋|⠙|⠹/);
+  assert.match(output.data, /✓/);
+});
+
 test('progress runner preserves a concise error on subprocess failure', async () => {
   const output = { isTTY: false, data: '', write(text) { this.data += text; } };
   const runner = new ReleaseProgress({ output, errorOutput: output });
