@@ -64,6 +64,20 @@ npm 整包注销后，同名包有 24 小时重发保护期。发布脚本在构
 
 发布后的正式全局安装、`brc setup`、配对及公网入口切换单独执行，避免切断当前远程连接。
 
+## 本机从原版切换至本地发行包
+
+切换脚本位于 Fork 源码根目录的 `scripts/switch-local-brc.ps1`；验收后的本地安装包位于上层 `repo/artifacts/inoceanlee-brc-2.1.0.tgz`，其内容已复制并校验，不依赖临时目录。先执行只读预检，确认本地 `.tgz`、原版进程、原 Relay 健康和 Funnel 转发；随后由本机 PowerShell 7 执行交互式切换：
+
+```powershell
+Set-Location 'C:\Users\Inoceanlee\work-space\files\dev-via-agents\my-brc\repo\better-remote-commander'
+& .\scripts\switch-local-brc.ps1
+& .\scripts\switch-local-brc.ps1 -Apply
+```
+
+脚本仅在输入 `CUTOVER` 后停止原版 Agent/Relay，并通过 pnpm 全局安装已验证的本地 `2.1.0` 包；执行 `brc setup`、设置公网 URL，并在首次 Agent 配对时临时延长启动等待时间。配对时使用本机代理地址 `http://127.0.0.1:13001/device/verify`，输入脚本显示的验证码。仅当 Relay、Traefik、Agent 都健康后，才把 Funnel 443 转发切换到现有 Traefik 13001 端口。服务的默认端口不变。
+
+此脚本只能在本机终端执行；停掉原版 Agent 后，现有 BRC 远程连接会中断。遇到失败时，按照脚本给出的回退步骤在原版终端恢复旧服务和 Funnel 3000 目标，不迁移旧数据库或凭据。保留原版终端窗口和两个原版全局包，直到新版 OAuth/MCP 与 Agent 验收完成。
+
 ## 升级与回退
 
 正式发布后，升级前记录已安装版本，并安全备份整个数据根。默认根目录为 `%LOCALAPPDATA%/BRC/`；自定义目录以 `BRC_DATA_ROOT` 为准。备份需包含 Relay 数据库及存在的 SQLite `-wal`、`-shm` 文件，并限制备份访问权限。
