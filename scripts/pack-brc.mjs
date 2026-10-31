@@ -11,11 +11,10 @@ import { fileURLToPath } from 'node:url';
 const workspaceRoot = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.resolve(process.argv[2] ?? path.join(workspaceRoot, 'dist-pack'));
 const options = new Set(process.argv.slice(3));
-if ([...options].some((option) => option !== '--with-next-patch' && !/^--version=\d+\.\d+\.\d+$/.test(option))) {
-  throw new Error(`Unknown pack-brc option: ${[...options].find((option) => option !== '--with-next-patch' && !/^--version=\d+\.\d+\.\d+$/.test(option))}`);
+if ([...options].some((option) => option !== '--with-next-patch')) {
+  throw new Error('Usage: node scripts/pack-brc.mjs <output> [--with-next-patch]');
 }
 const withNextPatch = options.has('--with-next-patch');
-const requestedVersion = [...options].find((option) => option.startsWith('--version='))?.slice('--version='.length);
 const packageDir = path.join(workspaceRoot, 'packages');
 const workDir = await mkdtemp(path.join(os.tmpdir(), 'brc-pack-'));
 const stageDir = path.join(workDir, 'package');
@@ -136,6 +135,11 @@ try {
   const manifests = await Promise.all(sourcePackages.map(async (name) =>
     JSON.parse(await readFile(path.join(packageDir, name, 'package.json'), 'utf8'))));
   const [cliManifest, , , sharedManifest] = manifests;
+  const releaseVersion = cliManifest.version;
+  if (typeof releaseVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(releaseVersion)) {
+    throw new Error('Missing or invalid CLI product version.');
+  }
+  const bundledSharedManifest = { ...sharedManifest, version: releaseVersion };
   const dependencies = collectRuntimeDependencies(manifests);
   dependencies['brc-shared'] = `file:vendor/brc-shared`;
 
@@ -146,14 +150,14 @@ try {
   await cp(path.join(packageDir, 'relay', 'dist'), path.join(stageDir, 'dist', 'services', 'relay'), { recursive: true });
   await cp(path.join(packageDir, 'agent', 'dist'), path.join(stageDir, 'dist', 'services', 'agent'), { recursive: true });
   await cp(path.join(packageDir, 'shared', 'dist'), path.join(stageDir, 'vendor', 'brc-shared', 'dist'), { recursive: true });
-  await writeFile(path.join(stageDir, 'vendor', 'brc-shared', 'package.json'), JSON.stringify(sharedManifest, null, 2));
+  await writeFile(path.join(stageDir, 'vendor', 'brc-shared', 'package.json'), JSON.stringify(bundledSharedManifest, null, 2));
   await cp(path.join(workspaceRoot, 'deploy', 'traefik'), path.join(stageDir, 'deploy', 'traefik'), { recursive: true });
   await cp(path.join(workspaceRoot, 'README.md'), path.join(stageDir, 'README.md'));
   await cp(path.join(workspaceRoot, 'LICENSE'), path.join(stageDir, 'LICENSE'));
 
   const packageManifest = {
     ...cliManifest,
-    version: requestedVersion ?? cliManifest.version,
+    version: releaseVersion,
     files: ['dist', 'deploy', 'README.md', 'LICENSE'],
     dependencies,
     bundledDependencies: Object.keys(dependencies),
@@ -168,7 +172,7 @@ try {
   await rm(bundledSharedPath, { recursive: true, force: true });
   await cp(path.join(stageDir, 'vendor', 'brc-shared'), bundledSharedPath, { recursive: true });
   await rm(path.join(stageDir, 'vendor'), { recursive: true, force: true });
-  packageManifest.dependencies['brc-shared'] = sharedManifest.version;
+  packageManifest.dependencies['brc-shared'] = releaseVersion;
   await writeFile(path.join(stageDir, 'package.json'), `${JSON.stringify(packageManifest, null, 2)}\n`);
 
   await chmod(path.join(stageDir, 'dist', 'cli.js'), 0o755);

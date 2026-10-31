@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { ReleaseProgress } from '../scripts/release-progress.mjs';
 import { registryRepublishAt } from '../scripts/npm-registry-policy.mjs';
+import { assertReleaseVersion } from '../scripts/release-version.mjs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -66,13 +67,27 @@ test('progress runner preserves a concise error on subprocess failure', async ()
   assert.match(output.data, /✗/);
 });
 
-test('Fork root and published CLI use the same explicit release version', () => {
-  const root = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
-  const published = JSON.parse(readFileSync(path.resolve('packages/cli/package.json'), 'utf8'));
-  assert.equal(root.version, published.version);
+test('only the public CLI manifest declares a product version', () => {
+  const read = (file) => JSON.parse(readFileSync(path.resolve(file), 'utf8'));
+  const published = read('packages/cli/package.json');
   assert.match(published.version, /^\d+\.\d+\.\d+$/);
-  const [major, minor] = published.version.split('.').map(Number);
-  assert.ok(major > 2 || (major === 2 && minor >= 1), 'Fork first feature release is at least 2.1.0');
+  for (const file of ['package.json', 'packages/shared/package.json', 'packages/relay/package.json', 'packages/agent/package.json']) {
+    assert.equal(Object.hasOwn(read(file), 'version'), false, file);
+  }
+  const release = readFileSync(script, 'utf8');
+  assert.match(release, /const version = manifest.version;/);
+  assert.match(release, /assertReleaseVersion\(version, publishedVersion\(\)\)/);
+  assert.doesNotMatch(release, /versionForRelease|rootManifest/);
+  assert.doesNotMatch(readFileSync(path.resolve('scripts/pack-brc.mjs'), 'utf8'), /requestedVersion|--version=/);
+});
+
+test('release requires a higher explicit CLI version than npm', () => {
+  assert.doesNotThrow(() => assertReleaseVersion('2.1.1', '2.1.0'));
+  assert.doesNotThrow(() => assertReleaseVersion('2.1.1', null));
+  assert.throws(() => assertReleaseVersion('2.1.1', '2.1.1'), /must exceed published/);
+  assert.throws(() => assertReleaseVersion('2.1.1', '2.1.2'), /must exceed published/);
+  assert.throws(() => assertReleaseVersion('2.1.1', '3.0.0'), /must exceed published/);
+  assert.throws(() => assertReleaseVersion('invalid', null), /Invalid release version/);
 });
 
 test('direct publication uses an interactive npm process', () => {

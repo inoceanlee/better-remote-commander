@@ -72,19 +72,28 @@ test('real Agent exposes a manageable pairing state before user approval', async
  const agentEntry = new URL('../packages/agent/dist/cli.js',import.meta.url);
  const file = path.join(root,'agent.ready.json');
  const child = spawn(process.execPath,[fileURLToPath(agentEntry),'--relay','http://127.0.0.1:'+server.address().port,'--no-browser'],
- {windowsHide:true,stdio:'ignore',env:{...Object.fromEntries(Object.entries(process.env).filter(([name])=>!name.startsWith('BRC_'))),BRC_HOME:path.join(root,'home'),BRC_UPSTREAM_TELEMETRY:'0',
+ {windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...Object.fromEntries(Object.entries(process.env).filter(([name])=>!name.startsWith('BRC_'))),BRC_HOME:path.join(root,'home'),BRC_UPSTREAM_TELEMETRY:'0',
  BRC_CONTROL_TOKEN:'a'.repeat(64),BRC_CONTROL_READY_FILE:file,BRC_MANAGED_ID:'00000000-0000-4000-8000-000000000001',
  BRC_MANAGED_SERVICE:'agent'}});
+ let childOutput = '';
+ child.stdout.on('data', (chunk) => { childOutput += chunk.toString(); });
+ child.stderr.on('data', (chunk) => { childOutput += chunk.toString(); });
  t.after(()=>{try{child.kill()}catch{}});
  let ready;
  for(let i=0;i<120;i++){
    try{ready=JSON.parse(await readFile(file,'utf8'));break}catch{await sleep(100)}
  }
  assert.ok(ready,'Agent should publish the managed control endpoint before human pairing');
- const response=await fetch('http://127.0.0.1:'+ready.port+'/health',{
-   headers:{authorization:'Bearer '+'a'.repeat(64)}});
- assert.equal(response.status,202);
- assert.equal((await response.json()).state,'pairing');
+ let response;
+ for (let i = 0; i < 100; i++) {
+   response = await fetch('http://127.0.0.1:'+ready.port+'/health',{
+     headers:{authorization:'Bearer '+'a'.repeat(64)}});
+   if (response.status === 202) break;
+   await sleep(100);
+ }
+ const health = await response.json();
+ assert.equal(response.status,202,JSON.stringify(health) + '\n' + childOutput);
+ assert.equal(health.state,'pairing');
 });
 
 test('release discovery recovers from a network interruption, 429, and 503', async () => {

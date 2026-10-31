@@ -172,6 +172,11 @@ test('single package tarball is complete, self-contained, and globally installab
 
   const manifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json']));
   const updatedManifest = JSON.parse(run('tar', ['-xOf', updatedTarball, 'package/package.json']));
+  const bundledShared = JSON.parse(run('tar', ['-xOf', tarball, 'package/node_modules/brc-shared/package.json']));
+  const sourceCli = JSON.parse(await readFile(path.join(repoRoot, 'packages/cli/package.json'), 'utf8'));
+  assert.equal(manifest.version, sourceCli.version, 'published product version must come from the CLI manifest');
+  assert.equal(bundledShared.version, manifest.version, 'bundled Shared version must follow the product version');
+  assert.equal(manifest.dependencies['brc-shared'], manifest.version);
   const version = manifest.version.match(/^(\d+)\.(\d+)\.(\d+)$/);
   assert.ok(version, `Expected a stable package version, got ${manifest.version}`);
   const nextVersion = `${version[1]}.${version[2]}.${Number(version[3]) + 1}`;
@@ -211,13 +216,13 @@ import path from 'node:path';
 const root = ${JSON.stringify(dataRoot)};
 const paths = Object.fromEntries(['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'].map((name) => [name, path.join(root, name)]));
 const services = createDefaultServices(paths, DEFAULT_SETTINGS, {});
-console.log(JSON.stringify(services.map(({ name, entrypoint, cwd }) => ({ name, entrypoint, cwd }))));
+console.log(JSON.stringify(services.map(({ name, entrypoint, cwd, env }) => ({ name, entrypoint, cwd, productVersion: env.BRC_PRODUCT_VERSION }))));
 `,
   ], { cwd: root }));
   assert.deepEqual(serviceEntries, [
-    { name: 'relay', entrypoint: path.join(extractedPackage, 'dist', 'services', 'relay', 'cli.js'), cwd: extractedPackage },
-    { name: 'traefik', entrypoint: path.join(extractedPackage, 'dist', 'cli.js'), cwd: extractedPackage },
-    { name: 'agent', entrypoint: path.join(extractedPackage, 'dist', 'services', 'agent', 'cli.js'), cwd: extractedPackage },
+    { name: 'relay', entrypoint: path.join(extractedPackage, 'dist', 'services', 'relay', 'cli.js'), cwd: extractedPackage, productVersion: manifest.version },
+    { name: 'traefik', entrypoint: path.join(extractedPackage, 'dist', 'cli.js'), cwd: extractedPackage, productVersion: manifest.version },
+    { name: 'agent', entrypoint: path.join(extractedPackage, 'dist', 'services', 'agent', 'cli.js'), cwd: extractedPackage, productVersion: manifest.version },
   ]);
 
   const isolatedHome = path.join(root, 'pnpm-home');

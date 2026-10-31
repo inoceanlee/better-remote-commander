@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ReleaseProgress } from './release-progress.mjs';
 import { registryRepublishAt } from './npm-registry-policy.mjs';
+import { assertReleaseVersion } from './release-version.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const name = '@inoceanlee/brc';
@@ -59,16 +60,6 @@ function quick(command, args, { allowFailure = false } = {}) {
   return result;
 }
 const git = (...args) => quick('git', args).stdout.trim();
-function versionForRelease(source, published) {
-  const parse = (version) => {
-    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Unexpected version: ' + version);
-    return version.split('.').map(Number);
-  };
-  if (!published || published === '0.0.0-stage') return source;
-  const a = parse(source), b = parse(published);
-  const newer = a.findIndex((value, i) => value !== b[i]);
-  return newer >= 0 && a[newer] > b[newer] ? source : [b[0], b[1], b[2] + 1].join('.');
-}
 function publishedVersion() {
   const result = quick('npm', ['view', name, 'version', '--json', '--registry', registry], { allowFailure: true });
   if (result.status !== 0) {
@@ -117,11 +108,7 @@ async function main() {
   const account = quick('npm', ['whoami', '--registry', registry]).stdout.trim();
   if (account !== 'inoceanlee') throw new Error('npm must be logged in as inoceanlee.');
   const manifest = JSON.parse(git('show', 'HEAD:packages/cli/package.json'));
-  const rootManifest = JSON.parse(git('show', 'HEAD:package.json'));
   if (manifest.name !== name) throw new Error('Unexpected npm package name.');
-  if (manifest.version !== rootManifest.version) {
-    throw new Error('Fork root and npm package versions must match before publishing.');
-  }
 
   const checkpoint = receiptFile(revision);
   if (existsSync(checkpoint)) {
@@ -133,7 +120,8 @@ async function main() {
     return;
   }
   if (git('tag', '--points-at', 'HEAD', '--list', 'brc-v*')) throw new Error('Current source commit already released.');
-  const version = versionForRelease(manifest.version, publishedVersion());
+  const version = manifest.version;
+  assertReleaseVersion(version, publishedVersion());
   const tag = 'brc-v' + version;
   if (git('tag', '--list', tag)) throw new Error('Release tag already exists: ' + tag);
   progress.print('Release: ' + name + '@' + version);
@@ -141,7 +129,7 @@ async function main() {
   if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);
   const output = mkdtempSync(path.join(tmpdir(), 'brc-publish-'));
   await progress.step(1, 5, '构建并打包（gzip 9 级）', async () => {
-    await command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--version=' + version, '--with-next-patch']);
+    await command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--with-next-patch']);
   });
   const archives = readdirSync(output).filter((file) => file.endsWith('.tgz'));
   if (archives.length !== 1 || archives[0] !== 'inoceanlee-brc-' + version + '.tgz') throw new Error('Unexpected package archives.');

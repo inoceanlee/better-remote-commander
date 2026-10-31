@@ -4,7 +4,6 @@ import { existsSync, watch, type FSWatcher } from 'fs';
 import { mkdir } from 'fs/promises';
 import os from 'os';
 import lockfile from 'proper-lockfile';
-import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 
 export interface ServerConfig {
@@ -105,7 +104,7 @@ class ConfigManager {
         this._isFirstRun = created;
       }
 
-      this.config['version'] = VERSION;
+      delete this.config.version;
       this.initialized = true;
       this.startConfigWatcher();
     } catch (error) {
@@ -244,7 +243,8 @@ class ConfigManager {
       }
       mutate(latest, existed);
       await this.writeConfigAtomically(latest);
-      this.config = { ...latest, version: VERSION };
+      delete latest.version;
+      this.config = { ...latest };
       return latest;
     } finally {
       try {
@@ -305,7 +305,7 @@ class ConfigManager {
     try {
       const latest = await this.readConfigFromDisk();
       for (const mutate of this.pendingMutations) mutate(latest);
-      latest['version'] = VERSION;
+      delete latest.version;
       this.config = latest;
     } catch (error: any) {
       if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);

@@ -13,10 +13,9 @@ const managedLog = installManagedLog();
 import { WsClient } from './transport/ws-client.js';
 import { pairDevice, loadCredentials, clearCredentials, saveCredentials, type DeviceCredentials } from './transport/pairing.js';
 import { callTool, listTools } from './dispatcher.js';
-import { VERSION as CORE_VERSION } from './core/version.js';
+import { VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 
-const AGENT_VERSION = process.env.BRC_PRODUCT_VERSION ?? 'unknown';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -125,14 +124,14 @@ async function resolveCredentials(): Promise<DeviceCredentials> {
 }
 
 const creds = await resolveCredentials();
-setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
+setCurrentClient({ name: 'brc-agent', version: VERSION });
 const tools = listTools();
 console.log(`brc-agent - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
 
 const start = (c: DeviceCredentials) => {
   client = new WsClient({
     relayUrl: c.relayUrl, token: c.deviceToken, deviceId: c.deviceId, name: c.name,
-    agentVersion: AGENT_VERSION, coreVersion: CORE_VERSION, tools, callTool, log,
+    agentVersion: VERSION, coreVersion: VERSION, tools, callTool, log,
     onUnauthorized: async () => {
       if (c.pairedAt === 'manual') return false;
       log('warn', 'Relay rejected our device token; re-pairing');

@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BrcPaths } from '../config/paths.js';
 import type { BrcSettings } from '../config/settings.js';
+import { readProductVersion } from '../config/product.js';
 import { LifecycleLock } from './lock.js';
 import {
   ProcessManager,
@@ -38,7 +39,7 @@ export function createDefaultServices(
   const isStandalonePackage = existsSync(packedRelayEntry) && existsSync(packedAgentEntry);
   const workspaceRoot = isStandalonePackage ? path.resolve(cliDist, '..') : path.resolve(cliDist, '../../..');
   const cliEntry = path.resolve(cliDist, 'cli.js');
-  const productVersion = (JSON.parse(readFileSync(path.resolve(cliDist, '../package.json'), 'utf8')) as { version: string }).version;
+  const productVersion = readProductVersion();
   const relayEntry = isStandalonePackage ? packedRelayEntry : path.resolve(cliDist, '../../relay/dist/cli.js');
   const agentEntry = isStandalonePackage ? packedAgentEntry : path.resolve(cliDist, '../../agent/dist/cli.js');
   const { relayPort: relay, proxyPort: proxy, healthPort: health } = settings.services;

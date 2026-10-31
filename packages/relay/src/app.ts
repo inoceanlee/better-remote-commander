@@ -189,7 +189,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.type('html').send(pages.homePage(cfg.publicUrl, !!userId, devices));
   });
 
-  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl }));
+  app.get('/health', (_req, res) => res.json({ ok: true, devices: hub.list().length, publicUrl: cfg.publicUrl }));
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
   app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {
