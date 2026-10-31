@@ -120,7 +120,11 @@ async function main() {
   const account = quick('npm', ['whoami', '--registry', registry]).stdout.trim();
   if (account !== 'inoceanlee') throw new Error('npm must be logged in as inoceanlee.');
   const manifest = JSON.parse(git('show', 'HEAD:packages/cli/package.json'));
+  const rootManifest = JSON.parse(git('show', 'HEAD:package.json'));
   if (manifest.name !== name) throw new Error('Unexpected npm package name.');
+  if (manifest.version !== rootManifest.version) {
+    throw new Error('Fork root and npm package versions must match before publishing.');
+  }
 
   const checkpoint = receiptFile(revision);
   if (existsSync(checkpoint)) {
@@ -135,6 +139,12 @@ async function main() {
   const version = versionForRelease(manifest.version, publishedVersion());
   const tag = 'brc-v' + version;
   if (git('tag', '--list', tag)) throw new Error('Release tag already exists: ' + tag);
+  const pending = JSON.parse(quick('npm', ['stage', 'list', name, '--json', '--registry', registry]).stdout.trim());
+  if (!Array.isArray(pending)) throw new Error('Unexpected npm staged package response.');
+  if (pending.length) {
+    const versions = pending.map((item) => item.version + ' (' + item.status + ')').join(', ');
+    throw new Error('An npm staged release already exists: ' + versions + '. Approve or reject it before starting a new release.');
+  }
   progress.print('Release: ' + name + '@' + version);
   const traefik = process.env.BRC_TRAEFIK_TEST_BINARY || path.resolve(root, '../traefik/traefik.exe');
   if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);

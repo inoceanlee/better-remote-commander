@@ -65,6 +65,15 @@ test('progress runner preserves a concise error on subprocess failure', async ()
   assert.match(output.data, /✗/);
 });
 
+test('Fork root and published CLI use the same explicit release version', () => {
+  const root = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
+  const published = JSON.parse(readFileSync(path.resolve('packages/cli/package.json'), 'utf8'));
+  assert.equal(root.version, published.version);
+  assert.match(published.version, /^\d+\.\d+\.\d+$/);
+  const [major, minor] = published.version.split('.').map(Number);
+  assert.ok(major > 2 || (major === 2 && minor >= 1), 'Fork first feature release is at least 2.1.0');
+});
+
 test('release automation is exposed only as a dedicated package command', () => {
   const manifest = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
   assert.equal(manifest.scripts['release:brc'], 'node scripts/release-brc.mjs');
