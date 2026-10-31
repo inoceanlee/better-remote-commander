@@ -47,6 +47,19 @@ pnpm up -g @inoceanlee/brc --latest
 `brc start` 不会自动下载或升级 Traefik。只有 `brc setup` 和 `brc update traefik` 会检查官方稳定版。
 首次 `brc setup` 会在暂存数据库中初始化管理员身份，成功后才放入正式数据库路径。首次初始化中断时，再次执行 `brc setup` 会清理上次暂存文件并重新初始化；已完成的正式数据库保持原样。已有数据根缺少数据库且没有首次初始化标记时，`setup` 拒绝新建；`start` 与 `restart` 也拒绝缺库启动。Relay 遇到管理员身份、会话密钥缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
 
+## 从 Fork 发布 npm
+
+维护者在干净且已推送的 Fork `main` 分支运行：
+
+```powershell
+pnpm release:brc --dry-run
+pnpm release:brc
+```
+
+发布入口自动执行构建、完整单测、真实 Traefik E2E、独立打包、npm 预检和正式发布，并核对 npm 上的新版本及推送 Git 发布标签。发布版本从源码版本和 npm 已发布版本自动选择下一个可用补丁版本。需提前登录 npm；需要双因素认证时在终端完成验证。发布不修改生产 BRC 服务和 Tailscale Funnel。
+
+发布后的正式全局安装、`brc setup`、配对及公网入口切换单独执行，避免切断当前远程连接。
+
 ## 升级与回退
 
 正式发布后，升级前记录已安装版本，并安全备份整个数据根。默认根目录为 `%LOCALAPPDATA%/BRC/`；自定义目录以 `BRC_DATA_ROOT` 为准。备份需包含 Relay 数据库及存在的 SQLite `-wal`、`-shm` 文件，并限制备份访问权限。

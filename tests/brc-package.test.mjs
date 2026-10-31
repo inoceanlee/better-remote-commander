@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { SqliteStore } from '../packages/relay/dist/store/sqlite.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -147,6 +147,18 @@ async function makePackageFixture(t) {
 
 test('single package tarball is complete, self-contained, and globally installable', { timeout: 180_000 }, async (t) => {
   const { root, tarball, updatedTarball } = await makePackageFixture(t);
+  for (const file of [tarball, updatedTarball]) {
+    const handle = await open(file, 'r');
+    try {
+      const header = Buffer.alloc(10);
+      await handle.read(header, 0, 10, 0);
+      assert.equal(header[0], 0x1f);
+      assert.equal(header[1], 0x8b);
+      assert.equal(header[8], 2, 'npm package must use gzip maximum compression level (9)');
+    } finally {
+      await handle.close();
+    }
+  }
   const names = run('tar', ['-tzf', tarball]).split(/\r?\n/).filter(Boolean);
   const files = new Set(names);
 
