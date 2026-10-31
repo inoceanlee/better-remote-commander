@@ -475,6 +475,7 @@ function detectPythonInfo(): SystemInfo['pythonInfo'] {
             const version = execSync(`${cmd} --version`, {
                 encoding: 'utf8',
                 timeout: 5000,
+                windowsHide: true,
                 stdio: ['pipe', 'pipe', 'pipe']
             }).trim();
 

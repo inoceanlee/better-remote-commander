@@ -482,6 +482,7 @@ const postTelemetryPayload = async (endpoint: string, payload: string): Promise<
 // can be silently dropped. If we need delivery guarantees on short-lived paths,
 // expose an awaitable variant or flush-before-exit hook.
 export const capture = async (event: string, properties?: any) => {
+    if (isTelemetryDisabledByEnv()) return;
     // Tool calls fired programmatically by the widget UIs must produce zero
     // telemetry — drop every event raised while serving one.
     if (isInsideUiOriginCall()) {

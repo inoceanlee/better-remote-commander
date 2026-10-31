@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ function childEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const name of [
     'BRC_DATA_ROOT', 'BRC_HOME', 'BRC_DB', 'BRC_RELAY', 'BRC_NAME', 'BRC_TOKEN', 'BRC_DEVICE_ID', 'BRC_LOG_FILE',
     'BRC_TRAEFIK_ROOT', 'BRC_TRAEFIK_CONFIG_DIR', 'BRC_TRAEFIK_PORT', 'BRC_TRAEFIK_HEALTH_PORT', 'BRC_RELAY_PORT', 'BRC_LOG_ROTATE_MIB',
-    'BRC_ADMIN_USER', 'BRC_ADMIN_PASSWORD', 'BRC_SESSION_SECRET', 'PORT', 'HOST', 'PUBLIC_URL', 'TRUST_PROXY',
+    'BRC_ADMIN_USER', 'BRC_ADMIN_PASSWORD', 'BRC_SESSION_SECRET', 'BRC_PRODUCT_VERSION', 'PORT', 'HOST', 'PUBLIC_URL', 'TRUST_PROXY',
   ]) delete env[name];
   return env;
 }
@@ -38,11 +38,12 @@ export function createDefaultServices(
   const isStandalonePackage = existsSync(packedRelayEntry) && existsSync(packedAgentEntry);
   const workspaceRoot = isStandalonePackage ? path.resolve(cliDist, '..') : path.resolve(cliDist, '../../..');
   const cliEntry = path.resolve(cliDist, 'cli.js');
+  const productVersion = (JSON.parse(readFileSync(path.resolve(cliDist, '../package.json'), 'utf8')) as { version: string }).version;
   const relayEntry = isStandalonePackage ? packedRelayEntry : path.resolve(cliDist, '../../relay/dist/cli.js');
   const agentEntry = isStandalonePackage ? packedAgentEntry : path.resolve(cliDist, '../../agent/dist/cli.js');
   const { relayPort: relay, proxyPort: proxy, healthPort: health } = settings.services;
   const proxyUrl = `http://127.0.0.1:${proxy}`;
-  const baseEnv = childEnvironment(parentEnv);
+  const baseEnv = { ...childEnvironment(parentEnv), BRC_PRODUCT_VERSION: productVersion };
   const relayEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
     BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
@@ -150,14 +151,16 @@ export class ServiceManager {
     try {
       for (const service of this.services) {
         const current = await this.processes.status(service);
-        if (current.state === 'running') continue;
+        if (current.state === 'running' || (service.name === 'agent' && current.state === 'pairing')) continue;
         if (current.state !== 'stopped') {
           throw new Error(`Cannot start ${service.name}: ${current.detail}`);
         }
         await this.processes.start(service);
         started.push(service);
         const status = await this.processes.status(service);
-        if (status.state !== 'running') throw new Error(`${service.name} did not become healthy: ${status.detail}`);
+        if (status.state !== 'running' && !(service.name === 'agent' && status.state === 'pairing')) {
+          throw new Error(`${service.name} did not become healthy: ${status.detail}`);
+        }
       }
     } catch (error) {
       const rollbackErrors: unknown[] = [];

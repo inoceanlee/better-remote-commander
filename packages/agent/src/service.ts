@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 const NAME = 'brc-agent';
 const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
 const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
-const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe' }).toString();
+const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe', windowsHide: true }).toString();
 
 export function installService(extraArgs: string[]): string {
   mkdirSync(home(), { recursive: true });

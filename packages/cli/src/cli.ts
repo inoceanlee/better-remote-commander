@@ -276,6 +276,7 @@ async function main(): Promise<void> {
         });
         await settingsManager.ensureConfigFile();
         await traefikManager.setup();
+        console.log('BRC setup completed. Run brc start to connect services.');
         return 0;
       },
       start: async () => {
@@ -292,7 +293,10 @@ async function main(): Promise<void> {
           }
           await operations.start();
         });
-        console.log('BRC services started.');
+        const agent = (await serviceManager.status()).find((item) => item.name === 'agent');
+        console.log(agent?.state === 'pairing'
+          ? 'Relay and Traefik started. Agent awaits approval; run brc logs agent for the pairing URL and code.'
+          : 'BRC services started.');
         return 0;
       },
       stop: async () => {

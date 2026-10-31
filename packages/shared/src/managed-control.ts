@@ -4,7 +4,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export interface ManagedHealth {
-  state: 'running' | 'degraded';
+  state: 'running' | 'degraded' | 'pairing';
   detail: string;
 }
 
@@ -41,7 +41,7 @@ export async function startManagedControlServer(options: {
     if (request.method === 'GET' && request.url === '/health') {
       void Promise.resolve(options.health()).then((health) => {
         const ok = health.state === 'running';
-        response.writeHead(ok ? 200 : 503, { 'content-type': 'application/json' });
+        response.writeHead(ok ? 200 : health.state === 'pairing' ? 202 : 503, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ ok, state: health.state, detail: health.detail }));
       }).catch(() => {
         response.writeHead(503, { 'content-type': 'application/json' });

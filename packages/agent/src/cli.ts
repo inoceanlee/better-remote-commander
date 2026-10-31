@@ -16,7 +16,7 @@ import { callTool, listTools } from './dispatcher.js';
 import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 
-const AGENT_VERSION = '2.0.2';
+const AGENT_VERSION = process.env.BRC_PRODUCT_VERSION ?? 'unknown';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -68,6 +68,34 @@ if (allowDirs.length) {
   console.log(`allowedDirectories set to: ${allowDirs.join(', ')}`);
 }
 
+let client: WsClient | undefined;
+let control: ManagedControlServer | undefined;
+let awaitingPairing = false;
+let stopping = false;
+const shutdown = async (sig?: string) => {
+  if (stopping) return;
+  stopping = true;
+  if (sig) console.log(`\n${sig} received, stopping agent`);
+  client?.stop();
+  await control?.close();
+  setTimeout(() => {
+    void (managedLog?.close() ?? Promise.resolve()).then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
+  }, 200);
+};
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+control = await startManagedControlServer({
+  health: () => awaitingPairing
+    ? { state: 'pairing', detail: 'Agent awaits device approval; run brc logs agent.' }
+    : client?.connected
+      ? { state: 'running', detail: 'Agent connected to Relay.' }
+      : { state: 'degraded', detail: 'Agent is not connected to Relay.' },
+  stop: () => shutdown(),
+});
+
 async function resolveCredentials(): Promise<DeviceCredentials> {
   const relayArg = arg('relay', 'BRC_RELAY');
   const name = arg('name', 'BRC_NAME', os.hostname())!;
@@ -88,15 +116,19 @@ async function resolveCredentials(): Promise<DeviceCredentials> {
     console.error('No saved credentials. Usage: brc-agent --relay <url> [--name <name>]');
     return await exitWithCode(2);
   }
-  return pairDevice({ relayUrl: relayArg, name, deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
+  awaitingPairing = true;
+  try {
+    return await pairDevice({ relayUrl: relayArg, name, deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
+  } finally {
+    awaitingPairing = false;
+  }
 }
 
 const creds = await resolveCredentials();
 setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
 const tools = listTools();
-console.log(`brc-agent ${AGENT_VERSION} (core ${CORE_VERSION}) - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
+console.log(`brc-agent - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
 
-let client: WsClient;
 const start = (c: DeviceCredentials) => {
   client = new WsClient({
     relayUrl: c.relayUrl, token: c.deviceToken, deviceId: c.deviceId, name: c.name,
@@ -114,27 +146,3 @@ const start = (c: DeviceCredentials) => {
   client.start();
 };
 start(creds);
-
-let control: ManagedControlServer | undefined;
-let stopping = false;
-const shutdown = async (sig?: string) => {
-  if (stopping) return;
-  stopping = true;
-  if (sig) console.log(`\n${sig} received, stopping agent`);
-  client.stop();
-  await control?.close();
-  setTimeout(() => {
-    void (managedLog?.close() ?? Promise.resolve()).then(
-      () => process.exit(0),
-      () => process.exit(1),
-    );
-  }, 200);
-};
-process.on('SIGINT', () => { void shutdown('SIGINT'); });
-process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
-control = await startManagedControlServer({
-  health: () => client.connected
-    ? { state: 'running', detail: 'Agent connected to Relay.' }
-    : { state: 'degraded', detail: 'Agent is not connected to Relay.' },
-  stop: () => shutdown(),
-});

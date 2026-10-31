@@ -5,8 +5,10 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import unzipper, { type ZipEntry } from 'unzipper';
 import type { BrcPaths } from '../config/paths.js';
+import { TRAEFIK_RELEASE_LOOKUP_ATTEMPTS, TRAEFIK_RELEASE_RETRY_DELAY_MS } from '../config/settings.js';
 import { MAX_EXECUTABLE_BYTES, ensureRegularFile, safeArchivePath, sha256File, type TraefikRelease } from './core.js';
 
 const RELEASE_API_URL = 'https://api.github.com/repos/traefik/traefik/releases/latest';
@@ -25,12 +27,43 @@ export class TraefikInput {
     this.releaseApiUrl = options.releaseApiUrl ?? RELEASE_API_URL;
   }
 
+  private async queryRelease(): Promise<Response> {
+    const maxAttempts = TRAEFIK_RELEASE_LOOKUP_ATTEMPTS;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(this.releaseApiUrl, {
+          headers: { accept: 'application/vnd.github+json', 'user-agent': 'brc-unified-cli' },
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (error) {
+        if (attempt === maxAttempts) throw new Error('Cannot reach the official Traefik release feed. Retry brc setup.', { cause: error });
+        await sleep(TRAEFIK_RELEASE_RETRY_DELAY_MS);
+        continue;
+      }
+      if (response.ok) return response;
+      const rateLimited = response.headers.get('x-ratelimit-remaining') === '0';
+      if (rateLimited) {
+        throw new Error(`GitHub API rate limit reached (HTTP ${response.status}). Retry brc setup after the limit resets.`);
+      }
+      const retryAfterHeader = response.headers.get('retry-after');
+      const retryAfterSeconds = retryAfterHeader === null ? NaN : Number(retryAfterHeader);
+      if (response.status === 429 && Number.isFinite(retryAfterSeconds)
+          && retryAfterSeconds > TRAEFIK_RELEASE_RETRY_DELAY_MS / 1000) {
+        throw new Error(`GitHub API is throttling requests (HTTP 429). Retry after ${retryAfterSeconds} seconds before running brc setup.`);
+      }
+      const transient = [403, 429, 500, 502, 503, 504].includes(response.status);
+      if (!transient || attempt === maxAttempts) {
+        throw new Error(`Cannot query the official Traefik release feed: HTTP ${response.status}. Retry brc setup after verifying GitHub access.`);
+      }
+      await response.body?.cancel();
+      await sleep(TRAEFIK_RELEASE_RETRY_DELAY_MS);
+    }
+    throw new Error('Traefik release lookup failed.');
+  }
+
   async latestRelease(): Promise<TraefikRelease> {
-    const response = await this.fetchImpl(this.releaseApiUrl, {
-      headers: { accept: 'application/vnd.github+json', 'user-agent': 'brc-unified-cli' },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`Cannot query the official Traefik release feed: HTTP ${response.status}.`);
+    const response = await this.queryRelease();
     const value = await response.json() as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Official Traefik release metadata is malformed.');
     const release = value as Record<string, unknown>;

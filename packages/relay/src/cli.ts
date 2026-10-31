@@ -51,7 +51,7 @@ try {
 const listening = once(relay.http, 'listening');
 relay.http.listen(cfg.port, cfg.host);
 await listening;
-log('info', `brc-relay ${cfg.relayVersion} listening on ${cfg.host}:${cfg.port}`);
+log('info', `brc-relay listening on ${cfg.host}:${cfg.port}`);
 log('info', `public URL ${cfg.publicUrl}  MCP: ${cfg.publicUrl}/mcp  pair: ${cfg.publicUrl}/device/verify`);
 
 let control: ManagedControlServer | undefined;

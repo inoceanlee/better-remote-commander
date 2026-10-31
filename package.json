@@ -20,7 +20,7 @@
         "pack:all": "pnpm -r --filter \"./packages/*\" exec pnpm pack --pack-destination ../../dist-pack",
         "release:brc": "node scripts/release-brc.mjs",
         "publish:all": "pnpm -r --filter \"./packages/*\" publish --access public",
-        "test:unit": "node --test packages/relay/test/unit.test.mjs tests/brc-cli.test.mjs tests/brc-config.test.mjs tests/brc-lifecycle.test.mjs tests/brc-clean.test.mjs tests/brc-traefik.test.mjs tests/brc-logs.test.mjs tests/brc-uninstall.test.mjs tests/brc-package.test.mjs tests/brc-identity.test.mjs tests/brc-release.test.mjs",
+        "test:unit": "node --test packages/relay/test/unit.test.mjs tests/brc-cli.test.mjs tests/brc-config.test.mjs tests/brc-lifecycle.test.mjs tests/brc-clean.test.mjs tests/brc-traefik.test.mjs tests/brc-logs.test.mjs tests/brc-uninstall.test.mjs tests/brc-package.test.mjs tests/brc-identity.test.mjs tests/brc-release.test.mjs tests/brc-maintenance-fixes.test.mjs tests/brc-cutover.test.mjs",
         "test:cli": "node --test tests/brc-cli.test.mjs",
         "test:e2e": "node scripts/e2e-all.mjs",
         "test": "pnpm test:unit \u0026\u0026 pnpm test:e2e"

@@ -1,7 +1,7 @@
 // One-shot e2e runner: boots relay + agent on a scratch port/db, auto-pairs, runs all suites, tears down.
 // pnpm test:e2e     (needs `pnpm build` first)
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, realpathSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
@@ -47,9 +47,16 @@ const procs = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relayCli = path.resolve('packages/relay/dist/cli.js');
 const agentCli = path.resolve('packages/agent/dist/cli.js');
+const productVersion = JSON.parse(readFileSync(path.resolve('packages/cli/package.json'), 'utf8')).version;
+
+function isolatedEnvironment(overrides = {}) {
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !name.startsWith('BRC_')));
+  return { ...inherited, ...overrides };
+}
 
 function start(name, args, env, executable = process.execPath) {
-  const p = spawn(executable, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(executable, args, { env: isolatedEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'] });
   p.out = '';
   p.stdout.on('data', (d) => { p.out += d; if (process.env.E2E_VERBOSE) process.stdout.write(`[${name}] ${d}`); });
   p.stderr.on('data', (d) => { p.out += d; if (process.env.E2E_VERBOSE) process.stderr.write(`[${name}] ${d}`); });
@@ -65,7 +72,7 @@ async function waitFor(fn, timeoutMs, what) {
 
 function runScript(script, ...args) {
   return new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, [script, ...args], { env: isolatedEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const timeout = setTimeout(() => {
       p.kill();
@@ -88,6 +95,7 @@ try {
     BRC_SESSION_SECRET: 'e2e',
     BRC_DB: path.join(scratch, 'relay.sqlite'),
     BRC_LOG_FILE: path.join(scratch, 'relay.log'),
+    BRC_PRODUCT_VERSION: productVersion,
     BRC_LOG_ROTATE_MIB: '1',
     LOG_LEVEL: 'warn',
   };
@@ -119,7 +127,7 @@ try {
     console.log(`official Traefik routes isolated E2E traffic through ${base}`);
   }
   const initialized = spawnSync(process.execPath, [relayCli, '--initialize'], {
-    env: { ...process.env, ...relayEnv },
+    env: isolatedEnvironment(relayEnv),
     encoding: 'utf8',
     timeout: 10_000,
     windowsHide: true,
@@ -129,7 +137,7 @@ try {
   const relay = start('relay', [relayCli], relayEnv);
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
-  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });
+  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home'), BRC_PRODUCT_VERSION: productVersion });
   const code = await waitFor(() => agent.out.match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 20_000, 'pairing code');
 
   let r = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ username: 'admin', password: pass, returnTo: '/' }) });

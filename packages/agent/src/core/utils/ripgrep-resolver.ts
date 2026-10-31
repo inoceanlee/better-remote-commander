@@ -37,7 +37,7 @@ export async function getRipgrepPath(): Promise<string> {
   try {
     const systemRg = process.platform === 'win32' ? 'rg.exe' : 'rg';
     const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const result = execSync(`${whichCmd} ${systemRg}`, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
+    const result = execSync(`${whichCmd} ${systemRg}`, { encoding: 'utf-8', windowsHide: true }).trim().split(/\r?\n/)[0];
     if (result && existsSync(result)) {
       cachedRgPath = result;
       return result;

@@ -119,7 +119,7 @@ export class WsClient {
     if (!msg) return this.log('warn', 'Dropped malformed frame');
     switch (msg.type) {
       case 'welcome':
-        this.log('info', `Relay ${msg.relayVersion} (protocol ${msg.protocol})`);
+        this.log('info', `Relay connected (protocol ${msg.protocol})`);
         return;
       case 'ping':
         this.armPongTimer();

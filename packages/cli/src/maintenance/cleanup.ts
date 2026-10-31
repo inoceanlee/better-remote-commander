@@ -411,6 +411,8 @@ async function cleanTraefikVersions(paths: BrcPaths, runtimes: Map<ManagedServic
     manifest = { version: 1, current: value.current, previous: value.previous };
   } catch (error) {
     if (errorCode(error) === 'ENOENT') {
+      const entries = await readdir(versionsPath, { withFileTypes: true });
+      if (entries.length === 0) return;
       issue(report.preserved, versionsPath, 'Traefik version metadata is missing; installed versions were preserved.');
     } else {
       issue(report.preserved, manifestPath, error instanceof Error ? error.message : String(error));

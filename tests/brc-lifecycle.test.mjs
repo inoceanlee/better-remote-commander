@@ -32,12 +32,20 @@ if (servicePort) {
     process.exit(23);
   }
 }
+let healthHits = 0;
 const control = createServer((req, res) => {
   if (req.socket.remoteAddress !== '127.0.0.1' || req.headers.authorization !== 'Bearer ' + token) {
     res.writeHead(401).end();
     return;
   }
   if (req.method === 'GET' && req.url === '/health') {
+    healthHits++;
+    if (mode === 'flaky' && healthHits === 2) { req.socket.destroy(); return; }
+    if (mode === 'pairing') {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, state: 'pairing', detail: 'Awaiting device approval.' }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, state: 'running', detail: 'fake service ready' }));
     return;
@@ -100,6 +108,31 @@ async function makeHarness(t, options = {}) {
   });
   return { root, paths: runtimePaths, spec, manager, entrypoint };
 }
+
+test('status retries a transient process inspection error before reporting degraded', async (t) => {
+  let failNext = false;
+  const harness = await makeHarness(t, {
+    processOptions: { inspectProcess: async (pid) => {
+      if (failNext) { failNext = false; throw new Error('transient process query failure'); }
+      return inspectProcess(pid);
+    }},
+  });
+  await harness.manager.start(harness.spec);
+  failNext = true;
+  assert.equal((await harness.manager.status(harness.spec)).state, 'running');
+});
+
+test('transient health transport errors do not mark a responsive process degraded', async (t) => {
+  const harness = await makeHarness(t, { mode: 'flaky' });
+  await harness.manager.start(harness.spec);
+  assert.equal((await harness.manager.status(harness.spec)).state, 'running');
+});
+
+test('unpaired agent starts without treating human approval as a process failure', async (t) => {
+  const harness = await makeHarness(t, { name: 'agent', mode: 'pairing', startupTimeoutMs: 700 });
+  await harness.manager.start(harness.spec);
+  assert.equal((await harness.manager.status(harness.spec)).state, 'pairing');
+});
 
 test('runtime timeout updates apply to the next managed process start', async (t) => {
   const harness = await makeHarness(t, {

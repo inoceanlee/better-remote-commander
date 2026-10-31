@@ -6,10 +6,10 @@ import { mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/pr
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { BrcPaths } from '../config/paths.js';
-import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
+import { DEFAULT_SETTINGS, HEALTH_REQUEST_TIMEOUT_MS, HEALTH_RETRY_COUNT, IDENTITY_INSPECTION_RETRY_COUNT, type BrcSettings } from '../config/settings.js';
 
 export type ManagedServiceName = 'relay' | 'traefik' | 'agent';
-export type ServiceState = 'stopped' | 'starting' | 'running' | 'degraded';
+export type ServiceState = 'stopped' | 'starting' | 'pairing' | 'running' | 'degraded';
 
 export interface ServiceStatus {
   name: ManagedServiceName;
@@ -63,12 +63,12 @@ interface ReadyInfo {
 
 interface HealthInfo {
   ok: boolean;
-  state: 'running' | 'degraded';
+  state: 'running' | 'degraded' | 'pairing';
   detail: string;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
-const CONTROL_REQUEST_TIMEOUT_MS = 1_000;
+const CONTROL_REQUEST_TIMEOUT_MS = HEALTH_REQUEST_TIMEOUT_MS;
 
 function recordPath(paths: BrcPaths, name: ManagedServiceName): string {
   return path.join(paths.runtime, `${name}.json`);
@@ -367,7 +367,7 @@ export class ProcessManager {
 
     let identity: ProcessIdentity | null;
     try {
-      identity = await this.inspect(record.pid);
+      identity = await this.inspectForStatus(record.pid);
     } catch (error) {
       return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Cannot verify process identity: ${processErrorMessage(error)}` };
     }
@@ -380,13 +380,25 @@ export class ProcessManager {
       const health = await this.readHealth(record);
       return {
         name: spec.name,
-        state: health.ok && health.state === 'running' ? 'running' : 'degraded',
+        state: health.state === 'pairing' && spec.name === 'agent' ? 'pairing' : health.ok && health.state === 'running' ? 'running' : 'degraded',
         pid: record.pid,
         detail: health.detail,
       };
     } catch (error) {
       return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Health check failed: ${processErrorMessage(error)}` };
     }
+  }
+
+  private async inspectForStatus(pid: number): Promise<ProcessIdentity | null> {
+    for (let attempt = 0; attempt <= IDENTITY_INSPECTION_RETRY_COUNT; attempt++) {
+      try {
+        return await this.inspect(pid);
+      } catch (error) {
+        if (attempt === IDENTITY_INSPECTION_RETRY_COUNT) throw error;
+        await sleep(this.pollIntervalMs);
+      }
+    }
+    throw new Error('Process identity inspection exhausted all retries.');
   }
 
   private async waitForReady(
@@ -424,6 +436,7 @@ export class ProcessManager {
         const health = await this.readHealth(record);
         detail = health.detail;
         if (health.ok && health.state === 'running') return;
+        if (spec.name === 'agent' && health.state === 'pairing') return;
       } catch (error) {
         detail = processErrorMessage(error);
       }
@@ -434,6 +447,18 @@ export class ProcessManager {
 
   private async readHealth(record: ManagedProcessRecord): Promise<HealthInfo> {
     if (record.controlPort < 1) throw new Error('Missing managed control port.');
+    for (let attempt = 0; attempt <= HEALTH_RETRY_COUNT; attempt++) {
+      try {
+        return await this.requestHealth(record);
+      } catch (error) {
+        if (attempt === HEALTH_RETRY_COUNT) throw error;
+        await sleep(this.pollIntervalMs);
+      }
+    }
+    throw new Error('Health request exhausted all retries.');
+  }
+
+  private async requestHealth(record: ManagedProcessRecord): Promise<HealthInfo> {
     const response = await fetch(`http://127.0.0.1:${record.controlPort}/health`, {
       headers: { authorization: `Bearer ${record.controlToken}` },
       signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS),
@@ -441,7 +466,7 @@ export class ProcessManager {
     const health = await response.json() as Partial<HealthInfo>;
     return {
       ok: response.ok && health.ok === true,
-      state: health.state === 'running' ? 'running' : 'degraded',
+      state: health.state === 'pairing' ? 'pairing' : health.state === 'running' ? 'running' : 'degraded',
       detail: typeof health.detail === 'string' ? health.detail : `Control endpoint returned HTTP ${response.status}.`,
     };
   }

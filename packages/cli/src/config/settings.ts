@@ -77,6 +77,13 @@ export const SETTING_ENVIRONMENT_KEYS: Readonly<Record<BrcSettingKey, string>> =
   'runtime.shutdownTimeoutMs': 'BRC_RUNTIME_SHUTDOWN_TIMEOUT_MS',
 });
 
+/** Internal health-check policy; independent from the user-controlled service startup deadline. */
+export const HEALTH_REQUEST_TIMEOUT_MS = 3_000;
+export const HEALTH_RETRY_COUNT = 2;
+export const IDENTITY_INSPECTION_RETRY_COUNT = 1;
+export const TRAEFIK_RELEASE_LOOKUP_ATTEMPTS = 2;
+export const TRAEFIK_RELEASE_RETRY_DELAY_MS = 1_000;
+
 export const DEFAULT_SETTINGS: Readonly<BrcSettings> = Object.freeze({
   version: 1,
   proxy: Object.freeze({
