@@ -148,7 +148,7 @@ try {
   await cp(path.join(packageDir, 'shared', 'dist'), path.join(stageDir, 'vendor', 'brc-shared', 'dist'), { recursive: true });
   await writeFile(path.join(stageDir, 'vendor', 'brc-shared', 'package.json'), JSON.stringify(sharedManifest, null, 2));
   await cp(path.join(workspaceRoot, 'deploy', 'traefik'), path.join(stageDir, 'deploy', 'traefik'), { recursive: true });
-  await cp(path.join(packageDir, 'cli', 'README.md'), path.join(stageDir, 'README.md'));
+  await cp(path.join(workspaceRoot, 'README.md'), path.join(stageDir, 'README.md'));
   await cp(path.join(workspaceRoot, 'LICENSE'), path.join(stageDir, 'LICENSE'));
 
   const packageManifest = {

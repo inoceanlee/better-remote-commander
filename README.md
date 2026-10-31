@@ -1,84 +1,115 @@
-# Better Remote Commander
+# Better Remote Commander (BRC)
 
-Self-hosted remote control of your own computers from **Claude** and **ChatGPT**.
-Files, terminal and processes on any machine you pair — through a relay **you** host, on **your** domain.
+Use your existing AI chat access to work on your own computer. BRC connects chat clients that support remote MCP (Model Context Protocol) to a self-hosted relay. You can manage files, run terminal commands, and inspect processes from a conversation.
 
+Free chat allowances, such as ChatGPT's free tier, and chat allowances separate from coding-agent quotas, such as those in the Gemini ecosystem, are useful resources. BRC can put compatible chat access to work when the client supports remote MCP tools. Connector access depends on the platform and plan.
+
+Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander).
+
+## Requirements
+
+- Windows x64 (tested on Windows 11).
+- Node.js 22.13 or newer and pnpm.
+- An HTTPS endpoint reachable by your chat client for remote access. Connect your public entry point to the local Traefik proxy.
+
+BRC runs Relay, Traefik, and Agent locally. You manage the public HTTPS entry point separately.
+
+## Installation
+
+Run these commands in PowerShell, in order.
+
+**1. Install BRC with pnpm.**
+
+```powershell
+pnpm add -g @inoceanlee/brc
 ```
-Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  ──outbound WebSocket──▶  agent on your machine
+
+**2. Initialize BRC.**
+
+```powershell
+brc setup
 ```
 
-- **Claude**: add the relay as a custom connector (remote MCP). Works in claude.ai web, desktop and mobile.
-- **ChatGPT**: add the relay as a remote MCP connector.
-- **Your infrastructure**: run the relay on a VPS, or on your PC behind a Cloudflare Tunnel / ngrok. SQLite, one container, no third-party service.
-- **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
-- **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see an audit log.
+Enter the administrator username (default: `admin`) and a password of at least eight characters. Setup creates the local configuration and installs Traefik.
 
-Tools available to the AI (24): `read_file`, `write_file`, `edit_block`, `list_directory`, `move_file`, `get_file_info`,
-`start_process`, `interact_with_process`, `read_process_output`, `list_processes`, `kill_process`, `start_search`,
-`write_pdf`, `get_config`, `set_config_value` and more — the same tool set as Desktop Commander.
+**3. Set the public URL** for remote MCP access.
 
-## Install
-
-### 1. Relay (once, on a server or your PC)
-
-**Docker (recommended)**
-```bash
-git clone https://github.com/shahidx0x/better-remote-commander.git && cd better-remote-commander
-cp .env.example .env        # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
-# Initialize a new volume before first start; choose one command.
-docker compose --profile local run --rm --entrypoint node relay dist/cli.js --initialize
-# For cloud, use the command below instead.
-# docker compose --profile cloud run --rm --entrypoint node relay-cloud dist/cli.js --initialize
-# Start one profile.
-docker compose --profile local up -d                            # localhost only (testing)
-# docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
-# docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
-# docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
+```powershell
+brc config set services.publicUrl https://your-domain.example
 ```
-Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
-Initialize a new named volume once before its first start; use `relay` for local/tunnel profiles and `relay-cloud` for cloud. Restore an existing database instead of initializing a replacement identity.
 
-**Without Docker**
-```ash
-npm i -g brc-relay
-brc-relay --initialize
-PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
+Point your HTTPS entry point to the local Traefik proxy at `127.0.0.1:13001`. The URL must be the origin, without `/mcp`.
+
+**4. Start BRC and check its status.**
+
+```powershell
+brc start
+brc status
 ```
-Run `brc-relay --initialize` once for a new database. Normal startup refuses a missing database.
 
-### 2. Agent (on every machine you want to control)
+On the first start, pair the Agent using the code and device verification page shown in its output or `brc logs agent`. Then add `https://your-domain.example/mcp` as a remote MCP server in a compatible chat client, such as ChatGPT or Claude, when supported by your plan.
 
-```ash
-npm i -g brc-agent          # any OS with Node 22.13+
-brc-agent --relay https://rdp.example.com --name "My PC"
+## Common commands
+
+| Command | Purpose |
+| --- | --- |
+| `brc help` | Show commands |
+| `brc start` | Start Relay, Traefik, and Agent |
+| `brc stop` | Stop all managed services |
+| `brc restart` | Restart managed services |
+| `brc status` | Check service status |
+| `brc logs [relay\|agent\|traefik]` | Read service logs |
+| `brc config show` | Show effective settings |
+| `brc config get <key>` | Read a setting |
+| `brc config set <key> <value>` | Change a setting |
+| `brc config apply` | Apply changes made to the YAML file |
+| `brc config path` | Show the configuration file path |
+| `brc update traefik` | Update Traefik |
+| `brc clean` | Clean temporary runtime data |
+
+To upgrade the BRC package, run `pnpm up -g @inoceanlee/brc --latest`.
+
+## Configuration and data
+
+BRC stores its configuration and runtime data under `%LOCALAPPDATA%\BRC\` on Windows.
+
+- Configuration: `%LOCALAPPDATA%\BRC\config\brc.yaml`
+- Data, Traefik files, runtime state, and logs: subdirectories of `%LOCALAPPDATA%\BRC\`
+
+Set `BRC_DATA_ROOT` to use a different root directory. Run `brc config path` or `brc config show` to find the file and inspect current settings.
+
+## Uninstallation
+
+Run these steps in order.
+
+**1. Uninstall BRC's services and private data.**
+
+```powershell
+brc uninstall
 ```
-The agent prints a pairing code and opens `https://rdp.example.com/device/verify`; sign in and approve.
-Then make it start at login: `brc-agent --install-service`.
 
-Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://rdp.example.com -e BRC_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
+Confirm the displayed data directory when prompted. This stops the managed services and removes BRC configuration, credentials, database, Traefik files, logs, and other data in its private directory.
 
-### 3. Connect your AI
+**2. Remove any remaining global pnpm package.**
 
-- **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
-- **ChatGPT (MCP)**: Settings → Connectors → add `https://rdp.example.com/mcp`.
-
-Useful URLs on your relay: `/admin` (devices, audit), `/device/verify` (pairing), `/auth/clients`, `/health`.
-
-## Build from source
-```bash
-pnpm install && pnpm build && pnpm test
-node packages/relay/dist/cli.js --initialize  # once for a new database
-node packages/relay/dist/cli.js               # relay
+```powershell
+pnpm remove -g @inoceanlee/brc
 ```
-Requires Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
 
-## License
+`brc uninstall` currently also schedules pnpm package removal automatically after the CLI exits on Windows. Wait for that removal to finish before running the second command; it is normally already complete.
 
-MIT — see [LICENSE](LICENSE).
+To remove the package while keeping BRC's stored data, run only `pnpm remove -g @inoceanlee/brc`. The public HTTPS entry point, such as Tailscale Funnel, remains under your separate management.
 
-## Credits
+## Development and contributing
 
-The agent's tool implementation (`packages/agent/src/core`) is derived from
-[Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) by Eduard Ruzga and contributors (MIT).
-Desktop Commander's hosted remote relay is proprietary; this project provides an open, self-hostable relay with the same
-device-agent model, plus OAuth for Claude/ChatGPT, device pairing, and a browser dashboard. See [NOTICE](NOTICE).
+```powershell
+git clone https://github.com/inoceanlee/better-remote-commander.git
+cd better-remote-commander
+pnpm install
+pnpm build
+pnpm test
+```
+
+Issues and pull requests are welcome in this repository. The source uses pnpm workspaces with separate CLI, Relay, Agent, and shared packages. See [architecture](docs/architecture.md) for implementation details.
+
+MIT license: [LICENSE](LICENSE). Tool attribution: [NOTICE](NOTICE).
