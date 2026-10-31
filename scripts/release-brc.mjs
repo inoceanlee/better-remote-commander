@@ -28,18 +28,28 @@ if (!dryRun && !process.stdin.isTTY) {
 
 const progress = new ReleaseProgress({ verbose });
 function binary(command) {
-  if (process.platform !== 'win32' || !['pnpm', 'npm'].includes(command)) return command;
+  if (process.platform !== 'win32' || !['pnpm', 'npm'].includes(command)) {
+    return { file: command, prefix: [] };
+  }
   const found = spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true });
   if (found.status !== 0) throw new Error('Missing ' + command + ' on PATH.');
   const files = found.stdout.split(/\r?\n/).filter(Boolean);
-  return files.find((file) => /\.exe$/i.test(file)) ?? files.find((file) => /\.cmd$/i.test(file)) ?? command;
+  if (command === 'npm') {
+    const cmd = files.find((file) => /npm\.cmd$/i.test(file));
+    if (!cmd) throw new Error('Cannot locate npm.cmd.');
+    const entrypoint = path.join(path.dirname(cmd), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    if (!existsSync(entrypoint)) throw new Error('Cannot locate npm CLI entrypoint: ' + entrypoint);
+    return { file: process.execPath, prefix: [entrypoint] };
+  }
+  const executable = files.find((file) => /\.exe$/i.test(file));
+  if (!executable) throw new Error('Cannot locate pnpm executable.');
+  return { file: executable, prefix: [] };
 }
 const executables = Object.fromEntries(['git', 'npm', 'pnpm'].map((cmd) => [cmd, binary(cmd)]));
 function quick(command, args, { allowFailure = false } = {}) {
-  const file = executables[command] ?? command;
-  const result = spawnSync(file, args, {
+  const executable = executables[command] ?? { file: command, prefix: [] };
+  const result = spawnSync(executable.file, [...executable.prefix, ...args], {
     cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
-    shell: process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(file),
     windowsHide: true, timeout: 30000,
   });
   if (result.error) throw result.error;
@@ -71,7 +81,8 @@ function receiptFile(revision) {
   return path.join(tmpdir(), 'brc-release-stage-' + revision + '.json');
 }
 async function command(tool, args, options = {}) {
-  return progress.command(executables[tool] ?? tool, args, { cwd: root, ...options });
+  const executable = executables[tool] ?? { file: tool, prefix: [] };
+  return progress.command(executable.file, [...executable.prefix, ...args], { cwd: root, ...options });
 }
 function saveReceipt(file, data) {
   writeFileSync(file, JSON.stringify(data) + '\n', { flag: 'w', mode: 0o600 });
