@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { ReleaseProgress } from '../scripts/release-progress.mjs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -15,7 +16,7 @@ test('release automation advertises a safe dry-run mode', () => {
   const result = execute('--help');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /pnpm release:brc \[--dry-run\]/);
-  assert.match(result.stdout, /without publishing or tagging/);
+  assert.match(result.stdout, /without uploading or tagging/);
 });
 
 test('release automation rejects unsupported arguments before publishing', () => {
@@ -27,7 +28,30 @@ test('release automation rejects unsupported arguments before publishing', () =>
 test('publishing requires a local interactive terminal before build or network work', () => {
   const result = execute();
   assert.equal(result.status, 2, result.stderr);
-  assert.match(result.stderr, /interactive terminal for two-factor authentication/);
+  assert.match(result.stderr, /local interactive terminal/);
+});
+
+test('progress runner captures child output and real progress updates', async () => {
+  const output = { isTTY: false, data: '', write(text) { this.data += text; } };
+  const runner = new ReleaseProgress({ output, errorOutput: output });
+  await runner.step(1, 3, 'Build package', async () => {
+    const result = await runner.command(process.execPath, ['-e', "process.stdout.write('BRC_PROGRESS:45\\nfinished\\n')"], { cwd: process.cwd() });
+    assert.match(result.stdout, /finished/);
+    assert.equal(runner.current.details, '45% gzip');
+  });
+  assert.match(output.data, /\[1\/3\] Build package/);
+  assert.match(output.data, /✓/);
+  assert.doesNotMatch(output.data, /\x1b\[2K/);
+});
+
+test('progress runner preserves a concise error on subprocess failure', async () => {
+  const output = { isTTY: false, data: '', write(text) { this.data += text; } };
+  const runner = new ReleaseProgress({ output, errorOutput: output });
+  await assert.rejects(
+    runner.step(2, 3, 'Test failure', async () => runner.command(process.execPath, ['-e', "console.error('known failure');process.exit(3)"])),
+    /known failure/,
+  );
+  assert.match(output.data, /✗/);
 });
 
 test('release automation is exposed only as a dedicated package command', () => {

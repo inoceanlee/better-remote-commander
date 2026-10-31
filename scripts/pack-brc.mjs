@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import { createGunzip, createGzip } from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
@@ -85,9 +86,24 @@ function runPnpm(args, cwd) {
 async function maximizeGzipCompression(destination, version) {
   const archive = path.join(destination, `inoceanlee-brc-${version}.tgz`);
   const staging = `${archive}.gzip-level-9`;
+  const total = (await stat(archive)).size;
+  let consumed = 0;
+  let lastPercent = -5;
+  const progress = new Transform({
+    transform(chunk, _encoding, done) {
+      consumed += chunk.length;
+      const percent = Math.min(100, Math.floor((consumed / total) * 20) * 5);
+      if (percent >= lastPercent + 5) {
+        process.stdout.write(`BRC_PROGRESS:${percent}\n`);
+        lastPercent = percent;
+      }
+      done(null, chunk);
+    },
+  });
   try {
     await pipeline(
       createReadStream(archive),
+      progress,
       createGunzip(),
       createGzip({ level: 9 }),
       createWriteStream(staging, { flags: 'wx' }),
@@ -114,6 +130,7 @@ function collectRuntimeDependencies(manifests) {
 
 try {
   verifyPnpmIsolation();
+  process.stdout.write('BRC_DETAIL:构建工作区包\n');
   runPnpm(['-r', '--filter', './packages/*', 'build'], workspaceRoot);
 
   const manifests = await Promise.all(sourcePackages.map(async (name) =>
@@ -144,6 +161,7 @@ try {
   await writeFile(path.join(stageDir, 'package.json'), `${JSON.stringify(packageManifest, null, 2)}\n`);
 
   await mkdir(outputDir, { recursive: true });
+  process.stdout.write('BRC_DETAIL:隔离安装运行依赖\n');
   await runPnpm(['install', '--prod', '--ignore-scripts', '--no-frozen-lockfile'], stageDir);
 
   const bundledSharedPath = path.join(stageDir, 'node_modules', 'brc-shared');
@@ -154,7 +172,9 @@ try {
   await writeFile(path.join(stageDir, 'package.json'), `${JSON.stringify(packageManifest, null, 2)}\n`);
 
   await chmod(path.join(stageDir, 'dist', 'cli.js'), 0o755);
+  process.stdout.write('BRC_DETAIL:组装正式发行包\n');
   runPnpm(['pack', '--pack-destination', outputDir], stageDir);
+  process.stdout.write('BRC_DETAIL:gzip 9 级压缩正式包\n');
   await maximizeGzipCompression(outputDir, packageManifest.version);
   if (withNextPatch) {
     const version = packageManifest.version.match(/^(\d+)\.(\d+)\.(\d+)$/);
@@ -164,6 +184,7 @@ try {
     const nextPatchDir = path.join(outputDir, 'next-patch');
     await mkdir(nextPatchDir, { recursive: true });
     await runPnpm(['pack', '--pack-destination', nextPatchDir], stageDir);
+    process.stdout.write('BRC_DETAIL:gzip 9 级压缩升级测试包\n');
     await maximizeGzipCompression(nextPatchDir, packageManifest.version);
   }
 } finally {
