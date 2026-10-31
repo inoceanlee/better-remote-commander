@@ -60,6 +60,8 @@ pnpm release:brc
 
 Fork 首次功能版本为 `2.1.0`，在根 `package.json` 与 `packages/cli/package.json` 同步指定。上游 BRC 与个人 npm 包属于不同发布体系；npm 首次发布未占用包名，不代表应继承上游版本号。正式发布通过本地交互式终端完成 npm 账号身份认证。
 
+npm 整包注销后，同名包有 24 小时重发保护期。发布脚本在构建前识别注册表的 `Unpublished on` 记录，保护期内直接报出允许重试的 UTC 时间，避免耗时构建后得到 `E409`。交互认证成功不代表包已入库，最终以 npm 版本查询确认。项目级 pnpm 设置统一放在 `pnpm-workspace.yaml`，避免 npm 读取未知配置时警告。
+
 发布后的正式全局安装、`brc setup`、配对及公网入口切换单独执行，避免切断当前远程连接。
 
 ## 升级与回退
