@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { ReleaseProgress } from '../scripts/release-progress.mjs';
+import { registryRepublishAt } from '../scripts/npm-registry-policy.mjs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -97,6 +98,14 @@ test('interactive subprocess inherits stdin and displays its output', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /RECEIVED:test-otp-input/);
   assert.match(result.stdout, /Authenticate/);
+});
+
+test('npm unpublished package names are blocked for 24 hours before building', () => {
+  const notice = '{"error":{"summary":"Unpublished on 2026-10-31T05:18:46.137Z"}}';
+  assert.equal(registryRepublishAt(notice, Date.parse('2026-10-31T14:00:00Z')), '2026-11-01T05:18:46.137Z');
+  assert.equal(registryRepublishAt(notice, Date.parse('2026-11-01T05:18:47Z')), null);
+  assert.equal(registryRepublishAt('{"error":{"summary":"Not Found"}}'), null);
+  assert.match(readFileSync(script, 'utf8'), /registryRepublishAt\(details\)/);
 });
 
 test('release automation is exposed only as a dedicated package command', () => {

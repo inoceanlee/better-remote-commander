@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ReleaseProgress } from './release-progress.mjs';
+import { registryRepublishAt } from './npm-registry-policy.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const name = '@inoceanlee/brc';
@@ -71,7 +72,12 @@ function versionForRelease(source, published) {
 function publishedVersion() {
   const result = quick('npm', ['view', name, 'version', '--json', '--registry', registry], { allowFailure: true });
   if (result.status !== 0) {
-    if (/E404|Not Found/i.test((result.stderr || '') + (result.stdout || ''))) return null;
+    const details = (result.stderr || '') + (result.stdout || '');
+    const retryAt = registryRepublishAt(details);
+    if (retryAt && !dryRun) {
+      throw new Error('npm registry is reserving this unpublished package name until ' + retryAt + ' (UTC). Do not retry publishing before then.');
+    }
+    if (/E404|Not Found|Unpublished on/i.test(details)) return null;
     throw new Error('Registry lookup failed: ' + (result.stderr || result.stdout).slice(-800));
   }
   return JSON.parse(result.stdout.trim());
