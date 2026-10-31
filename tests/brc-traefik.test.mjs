@@ -491,11 +491,10 @@ test('service order keeps Relay behind Traefik and routes Agent traffic through 
     BRC_RELAY_PORT: '13000',
     BRC_TRAEFIK_PORT: '13001',
     BRC_TRAEFIK_HEALTH_PORT: '13002',
-    PUBLIC_URL: 'https://brc.example.test',
   };
   const settings = {
     ...structuredClone(DEFAULT_SETTINGS),
-    services: { ...DEFAULT_SETTINGS.services, relayPort: 13000, proxyPort: 13001, healthPort: 13002 },
+    services: { ...DEFAULT_SETTINGS.services, relayPort: 13000, proxyPort: 13001, healthPort: 13002, publicUrl: 'https://brc.example.test' },
     logs: { ...DEFAULT_SETTINGS.logs, rotateMiB: 2 },
     runtime: { ...DEFAULT_SETTINGS.runtime, startupTimeoutMs: 12345, shutdownTimeoutMs: 6789 },
   };

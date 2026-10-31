@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_SETTINGS } from '../packages/cli/dist/config/settings.js';
+import { createDefaultServices } from '../packages/cli/dist/lifecycle/services.js';
 import { resolveBrcPaths } from '../packages/cli/dist/config/paths.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { SettingsManager } from '../packages/cli/dist/config/manager.js';
@@ -35,6 +36,7 @@ test('central settings defaults match the public configuration contract', () => 
       relayPort: 3000,
       proxyPort: 13001,
       healthPort: 13002,
+      publicUrl: '',
     },
     logs: {
       retentionDays: 7,
@@ -46,6 +48,57 @@ test('central settings defaults match the public configuration contract', () => 
       shutdownTimeoutMs: 3_000,
     },
   });
+});
+
+test('public URL setting persists, validates origins and marks restart required', async (t) => {
+  const { manager, paths, env, lock, apply } = await createFixture(t);
+  assert.deepEqual(manager.get('services.publicUrl'), { value: '', source: 'default' });
+  const origin = 'https://brc.example.com';
+  const result = await manager.set('services.publicUrl', origin);
+  assert.equal(result.restartRequired, true);
+  const disk = await readFile(path.join(paths.config, 'brc.yaml'), 'utf8');
+  assert.match(disk, /publicUrl: ['"]?https:\/\/brc\.example\.com['"]?/);
+  const next = await SettingsManager.load(paths, env, { lock, apply });
+  assert.deepEqual(next.get('services.publicUrl'), { value: origin, source: 'file' });
+  for (const invalid of ['javascript:alert(1)', 'https://user:pass@example.com', 'https://brc.example.com/path', 'https://brc.example.com/?x=1', 'https://brc.example.com/#x', 'https://brc.example.com?', 'https://brc.example.com#']) {
+    await assert.rejects(next.set('services.publicUrl', invalid), /services\.publicUrl/);
+  }
+  assert.deepEqual(next.get('services.publicUrl'), { value: origin, source: 'file' });
+});
+
+test('Relay uses persisted public URL across separate CLI service constructions', async (t) => {
+  const { manager, paths, env, lock, apply } = await createFixture(t);
+  const origin = 'https://brc.example.com';
+  await manager.set('services.publicUrl', origin);
+  const next = await SettingsManager.load(paths, env, { lock, apply });
+  const parentEnv = { PUBLIC_URL: 'https://stale-env.example.com' };
+  const first = createDefaultServices(paths, next.snapshot(), parentEnv).find((service) => service.name === 'relay');
+  const second = createDefaultServices(paths, next.snapshot(), {}).find((service) => service.name === 'relay');
+  assert.equal(first.env.PUBLIC_URL, origin);
+  assert.equal(second.env.PUBLIC_URL, origin);
+  const defaultService = createDefaultServices(paths, DEFAULT_SETTINGS, parentEnv).find((service) => service.name === 'relay');
+  assert.equal(defaultService.env.PUBLIC_URL, 'http://127.0.0.1:13001');
+  assert.equal(first.env.HOST, '127.0.0.1');
+  assert.equal(first.env.BRC_ADMIN_PASSWORD, undefined);
+  assert.equal(first.env.BRC_SESSION_SECRET, undefined);
+});
+
+test('public URL environment override and CLI clear preserve configuration semantics', async (t) => {
+  const { manager, paths, lock, apply } = await createFixture(t);
+  await manager.set('services.publicUrl', 'https://saved.example.com');
+  const override = await SettingsManager.load(paths, {
+    BRC_DATA_ROOT: paths.root,
+    BRC_PUBLIC_URL: 'https://override.example.com',
+  }, { lock, apply });
+  assert.deepEqual(override.get('services.publicUrl'), {
+    value: 'https://override.example.com', source: 'environment',
+  });
+
+  const output = [];
+  const result = await runConfigCommand(['set', 'services.publicUrl', ''], commandDependencies(manager, paths, output));
+  assert.equal(result, 0);
+  assert.match(output.join('\\n'), /Restart/);
+  assert.deepEqual(manager.get('services.publicUrl'), { value: '', source: 'file' });
 });
 
 test('missing configuration uses defaults and reports default sources', async (t) => {

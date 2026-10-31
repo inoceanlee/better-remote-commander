@@ -40,6 +40,7 @@ const STATIC_SETTINGS: readonly BrcSettingKey[] = [
   'services.relayPort',
   'services.proxyPort',
   'services.healthPort',
+  'services.publicUrl',
 ];
 
 function readValue<K extends BrcSettingKey>(settings: Readonly<BrcSettings>, key: K): BrcSettingValues[K] {

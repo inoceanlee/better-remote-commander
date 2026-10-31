@@ -16,10 +16,15 @@ pnpm add -g @inoceanlee/brc
 
 ```powershell
 brc setup
+# 使用公网入口时，先运行：brc config set services.publicUrl https://your-domain.example
 brc start
 ```
 
-首次执行 `brc setup` 会提示输入管理员用户名（默认 `admin`）与密码（输入时隐藏，至少 8 个字符）。密码仅以哈希形式保存在 Relay SQLite 数据库；会话密钥在首次初始化时生成并存入同一数据库。后续 `brc start` 和 `brc restart` 不再要求密码或会话密钥环境变量。非交互式首次初始化可以通过 `BRC_ADMIN_USER` 和 `BRC_ADMIN_PASSWORD` 环境变量传入一次性初始化值，启动服务不会继承这些变量。首次初始化完成后应清除临时环境变量。
+首次执行 `brc setup` 会提示输入管理员用户名（默认 `admin`）与密码（输入时隐藏，至少 8 个字符）。密码仅以哈希形式保存在 Relay SQLite 数据库；会话密钥在首次初始化时生成并存入同一数据库。后续 `brc start` 和 `brc restart` 不再要求密码或会话密钥环境变量。
+
+使用公网 HTTPS 入口时，在首次 `brc start` 之前运行 `brc config set services.publicUrl https://your-domain.example`。该地址保存在 `brc.yaml`，之后每次启动都会继续使用。修改地址后需要运行 `brc restart` 才能使 Relay 的 OAuth 地址生效。未配置时默认使用本地 Traefik 地址；`BRC_PUBLIC_URL` 可以作为显式环境覆盖。
+
+非交互式首次初始化可以通过 `BRC_ADMIN_USER` 和 `BRC_ADMIN_PASSWORD` 环境变量传入一次性初始化值，启动服务不会继承这些变量。首次初始化完成后应清除临时环境变量。
 
 Node.js 版本必须为 22.13 或更高。
 

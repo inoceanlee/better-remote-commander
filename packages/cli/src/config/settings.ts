@@ -12,6 +12,7 @@ export interface BrcSettings {
     relayPort: number;
     proxyPort: number;
     healthPort: number;
+    publicUrl: string;
   };
   logs: {
     retentionDays: number;
@@ -32,6 +33,7 @@ export interface BrcSettingValues {
   'services.relayPort': number;
   'services.proxyPort': number;
   'services.healthPort': number;
+  'services.publicUrl': string;
   'logs.retentionDays': number;
   'logs.maxTotalMiB': number;
   'logs.rotateMiB': number;
@@ -51,6 +53,7 @@ export const BRC_SETTING_KEYS = [
   'services.relayPort',
   'services.proxyPort',
   'services.healthPort',
+  'services.publicUrl',
   'logs.retentionDays',
   'logs.maxTotalMiB',
   'logs.rotateMiB',
@@ -66,6 +69,7 @@ export const SETTING_ENVIRONMENT_KEYS: Readonly<Record<BrcSettingKey, string>> =
   'services.relayPort': 'BRC_RELAY_PORT',
   'services.proxyPort': 'BRC_TRAEFIK_PORT',
   'services.healthPort': 'BRC_TRAEFIK_HEALTH_PORT',
+  'services.publicUrl': 'BRC_PUBLIC_URL',
   'logs.retentionDays': 'BRC_LOG_RETENTION_DAYS',
   'logs.maxTotalMiB': 'BRC_LOG_MAX_TOTAL_MIB',
   'logs.rotateMiB': 'BRC_LOG_ROTATE_MIB',
@@ -79,7 +83,7 @@ export const DEFAULT_SETTINGS: Readonly<BrcSettings> = Object.freeze({
     rate: Object.freeze({ average: 10, period: '1s', burst: 30 }),
     concurrent: 16,
   }),
-  services: Object.freeze({ relayPort: 3000, proxyPort: 13001, healthPort: 13002 }),
+  services: Object.freeze({ relayPort: 3000, proxyPort: 13001, healthPort: 13002, publicUrl: '' }),
   logs: Object.freeze({ retentionDays: 7, maxTotalMiB: 50, rotateMiB: 4 }),
   runtime: Object.freeze({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 3_000 }),
 });
@@ -126,6 +130,17 @@ export function withSettingValue<K extends BrcSettingKey>(
 }
 
 function validateSettingValue(key: BrcSettingKey, value: unknown): number | string {
+  if (key === 'services.publicUrl') {
+    if (typeof value !== 'string') throw new Error('services.publicUrl must be a URL string.');
+    if (value === '') return value;
+    try {
+      const url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.origin !== value) {
+        throw new Error('invalid');
+      }
+    } catch { throw new Error('services.publicUrl must be an absolute HTTP(S) origin without a path, credentials, query or fragment.'); }
+    return value;
+  }
   if (key === 'proxy.rate.period') {
     if (typeof value !== 'string' || !/^(?:\d+(?:\.\d+)?)(?:ms|s|m|h)$/.test(value) || Number.parseFloat(value) <= 0) {
       throw new Error(`${key} must be a positive duration such as 1s.`);
@@ -190,7 +205,7 @@ function collectFileValues(document: unknown): Map<BrcSettingKey, unknown> {
 }
 
 function parseEnvironmentValue(key: BrcSettingKey, value: string): number | string {
-  if (key === 'proxy.rate.period') return validateSettingValue(key, value);
+  if (key === 'proxy.rate.period' || key === 'services.publicUrl') return validateSettingValue(key, value);
   if (!/^-?(?:\d+)(?:\.\d+)?$/.test(value.trim())) throw new Error(`${SETTING_ENVIRONMENT_KEYS[key]} must be a number.`);
   return validateSettingValue(key, Number(value));
 }
@@ -233,10 +248,10 @@ export function resolveSettings(document: unknown, env: NodeJS.ProcessEnv): Reso
 }
 
 export function parseSettingArgument<K extends BrcSettingKey>(key: K, value: string): BrcSettingValues[K] {
-  if (key !== 'proxy.rate.period' && !/^-?(?:\d+)(?:\.\d+)?$/.test(value)) {
+  if (key !== 'proxy.rate.period' && key !== 'services.publicUrl' && !/^-?(?:\d+)(?:\.\d+)?$/.test(value)) {
     throw new Error(`${key} must be a number.`);
   }
-  return validateSettingValue(key, key === 'proxy.rate.period' ? value : Number(value)) as BrcSettingValues[K];
+  return validateSettingValue(key, key === 'proxy.rate.period' || key === 'services.publicUrl' ? value : Number(value)) as BrcSettingValues[K];
 }
 
 export function isBrcSettingKey(value: string): value is BrcSettingKey {

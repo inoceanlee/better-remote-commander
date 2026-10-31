@@ -36,7 +36,7 @@ export async function runConfigCommand(
       return 0;
     }
     case 'set': {
-      if (args.length !== 3 || !keyArgument || !valueArgument || !isBrcSettingKey(keyArgument)) throw usageError();
+      if (args.length !== 3 || !keyArgument || valueArgument === undefined || !isBrcSettingKey(keyArgument)) throw usageError();
       const value = parseSettingArgument(keyArgument, valueArgument);
       const result = await dependencies.manager.set(keyArgument, value);
       const effective = dependencies.manager.get(keyArgument);

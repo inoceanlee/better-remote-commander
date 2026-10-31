@@ -212,6 +212,18 @@ test('noninteractive first setup fails before creating a new identity', async (t
   assert.equal(existsSync(path.join(root, 'data', 'relay.sqlite')), false);
 });
 
+test('public URL persists through separate CLI invocations', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-public-url-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const origin = 'https://brc.example.com';
+  const saved = runCliProcess(['config', 'set', 'services.publicUrl', origin], root);
+  assert.equal(saved.status, 0, saved.stderr);
+  assert.match(saved.stdout, /Restart/);
+  const loaded = runCliProcess(['config', 'get', 'services.publicUrl'], root);
+  assert.equal(loaded.status, 0, loaded.stderr);
+  assert.match(loaded.stdout, /services\.publicUrl = https:\/\/brc\.example\.com \(file\)/);
+});
+
 test('data-root override resolves isolated paths without using Agent BRC_HOME', () => {
   const override = path.join(os.tmpdir(), 'isolated-brc');
   const result = probeResult(runProbe(`

@@ -48,7 +48,7 @@ export function createDefaultServices(
     BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
     HOST: '127.0.0.1',
     PORT: String(relay),
-    PUBLIC_URL: parentEnv.PUBLIC_URL || proxyUrl,
+    PUBLIC_URL: settings.services.publicUrl || proxyUrl,
     TRUST_PROXY: 'false',
     BRC_DB: path.join(paths.data, 'relay.sqlite'),
     BRC_LOG_FILE: path.join(paths.logs, 'relay.log'),
