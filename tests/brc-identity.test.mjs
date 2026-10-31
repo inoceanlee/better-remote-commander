@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { createHmac, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -252,7 +252,7 @@ test('setup initializes a fresh Relay identity once and rejects a missing databa
   try {
     assert.throws(() => database.initializeForNewRoot(false), /existing.*data root/i);
     assert.equal(existsSync(file), false);
-    database.initializeForNewRoot(true);
+    database.initializeForNewRoot(true, { username: 'admin', password: 'password' });
     assert.equal(existsSync(file), true);
     const store = SqliteStore.open(file);
     let first;
@@ -274,6 +274,76 @@ test('setup initializes a fresh Relay identity once and rejects a missing databa
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('setup discards incomplete staging and rebuilds a clean identity', () => {
+  const { directory, file } = tempDatabase();
+  const stage = `${file}.initializing`;
+  const marker = `${file}.setup-pending`;
+  SqliteStore.initialize(stage);
+  writeFileSync(marker, '');
+  const database = new RelayDatabase(file, {
+    entrypoint: path.resolve('packages/relay/dist/cli.js'),
+    cwd: process.cwd(),
+    env: { ...process.env, BRC_DB: file },
+  });
+  try {
+    database.initializeForNewRoot(false, { username: 'alice', password: 'new-test-password' });
+    assert.equal(existsSync(stage), false);
+    assert.equal(existsSync(marker), false);
+    const store = SqliteStore.open(file);
+    try {
+      assert.equal(store.getAdministrator().username, 'alice');
+      assert.match(store.getSessionSecret(), /^[a-f0-9]{64}$/);
+    } finally { store.close(); }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('failed first setup keeps retry marker and never creates a live identity', () => {
+  const { directory, file } = tempDatabase();
+  const entrypoint = path.resolve('packages/relay/dist/cli.js');
+  try {
+    const broken = new RelayDatabase(file, {
+      entrypoint: path.join(directory, 'missing-entrypoint.js'),
+      cwd: process.cwd(),
+      env: { ...process.env, BRC_DB: file },
+    });
+    assert.throws(() => broken.initializeForNewRoot(true, { username: 'alice', password: 'new-test-password' }));
+    assert.equal(existsSync(file), false);
+    assert.equal(existsSync(`${file}.initializing`), false);
+    assert.equal(existsSync(`${file}.setup-pending`), true);
+
+    const repaired = new RelayDatabase(file, { entrypoint, cwd: process.cwd(), env: { ...process.env, BRC_DB: file } });
+    repaired.initializeForNewRoot(false, { username: 'alice', password: 'new-test-password' });
+    assert.equal(existsSync(`${file}.setup-pending`), false);
+    const store = SqliteStore.open(file);
+    try { assert.equal(store.getAdministrator().username, 'alice'); }
+    finally { store.close(); }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('completed identity survives stale setup files without replacement', () => {
+  const { directory, file } = tempDatabase();
+  const database = new RelayDatabase(file, {
+    entrypoint: path.resolve('packages/relay/dist/cli.js'), cwd: process.cwd(), env: { ...process.env, BRC_DB: file },
+  });
+  try {
+    database.initializeForNewRoot(true, { username: 'alice', password: 'initial-secret' });
+    const original = SqliteStore.open(file);
+    let identity;
+    try { identity = { id: original.getAdministrator().id, secret: original.getSessionSecret() }; }
+    finally { original.close(); }
+    writeFileSync(`${file}.setup-pending`, '');
+    writeFileSync(`${file}.initializing`, 'partial');
+    database.initializeForNewRoot(false);
+    const reopened = SqliteStore.open(file);
+    try {
+      assert.equal(reopened.getAdministrator().id, identity.id);
+      assert.equal(reopened.getSessionSecret(), identity.secret);
+      assert.equal(existsSync(`${file}.setup-pending`), false);
+      assert.equal(existsSync(`${file}.initializing`), false);
+    } finally { reopened.close(); }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('invalid administrator bootstrap input leaves the database absent', () => {

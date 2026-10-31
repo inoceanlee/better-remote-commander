@@ -45,7 +45,7 @@ pnpm up -g @inoceanlee/brc --latest
 ```
 
 `brc start` 不会自动下载或升级 Traefik。只有 `brc setup` 和 `brc update traefik` 会检查官方稳定版。
-首次 `brc setup` 会在新数据根初始化 Relay 数据库和管理员身份。已有数据根缺少数据库时，`setup` 会拒绝新建；`start` 与 `restart` 也会拒绝启动。Relay 遇到管理员身份、会话密钥缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
+首次 `brc setup` 会在暂存数据库中初始化管理员身份，成功后才放入正式数据库路径。首次初始化中断时，再次执行 `brc setup` 会清理上次暂存文件并重新初始化；已完成的正式数据库保持原样。已有数据根缺少数据库且没有首次初始化标记时，`setup` 拒绝新建；`start` 与 `restart` 也拒绝缺库启动。Relay 遇到管理员身份、会话密钥缺失或孤立用户关联时会停止启动，并在迁移旧表前创建备份。
 
 ## 升级与回退
 

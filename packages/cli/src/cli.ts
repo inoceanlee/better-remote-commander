@@ -221,7 +221,9 @@ async function requestAdministrator(): Promise<{ username: string; password: str
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
-  const rootWasEmpty = !existsSync(paths.root) || readdirSync(paths.root).length === 0;
+  const rootWasEmpty = !existsSync(paths.root) || readdirSync(paths.root).every((entry) =>
+    entry === 'runtime' && readdirSync(paths.runtime).length === 0,
+  );
   const lifecycleLock = new LifecycleLock(paths);
   let configTraefikManager: TraefikManager | undefined;
   const settingsManager = await SettingsManager.load(paths, process.env, {
@@ -268,14 +270,11 @@ async function main(): Promise<void> {
     paths,
     commands: {
       setup: async () => {
-        if (!relayDatabase.exists()) {
-          if (!rootWasEmpty) relayDatabase.assertExists();
-          const administrator = await requestAdministrator();
-          await settingsManager.ensureConfigFile();
+        const administrator = relayDatabase.exists() ? undefined : await requestAdministrator();
+        await lifecycleLock.runExclusive(async () => {
           relayDatabase.initializeForNewRoot(rootWasEmpty, administrator);
-        } else {
-          await settingsManager.ensureConfigFile();
-        }
+        });
+        await settingsManager.ensureConfigFile();
         await traefikManager.setup();
         return 0;
       },
