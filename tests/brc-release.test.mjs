@@ -24,6 +24,12 @@ test('release automation rejects unsupported arguments before publishing', () =>
   assert.match(result.stderr, /Usage: pnpm release:brc/);
 });
 
+test('publishing requires a local interactive terminal before build or network work', () => {
+  const result = execute();
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /interactive terminal for two-factor authentication/);
+});
+
 test('release automation is exposed only as a dedicated package command', () => {
   const manifest = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
   assert.equal(manifest.scripts['release:brc'], 'node scripts/release-brc.mjs');

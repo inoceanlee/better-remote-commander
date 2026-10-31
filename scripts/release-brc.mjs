@@ -19,6 +19,10 @@ if (help) {
   console.log('Use --dry-run to run every check without publishing or tagging.');
   process.exit(0);
 }
+if (!dryRun && !process.stdin.isTTY) {
+  console.error('npm publishing requires an interactive terminal for two-factor authentication. Run pnpm release:brc locally.');
+  process.exit(2);
+}
 
 function binary(command) {
   if (process.platform !== 'win32' || !['pnpm', 'npm'].includes(command)) {
