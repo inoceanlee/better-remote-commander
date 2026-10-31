@@ -74,6 +74,31 @@ test('Fork root and published CLI use the same explicit release version', () => 
   assert.ok(major > 2 || (major === 2 && minor >= 1), 'Fork first feature release is at least 2.1.0');
 });
 
+test('direct publication uses an interactive npm process', () => {
+  const source = readFileSync(script, 'utf8');
+  assert.match(source, /await command\('npm', \['publish', archive, '--access', 'public', '--registry', registry\], \{ interactive: true \}\)/);
+  assert.doesNotMatch(source, /'stage', 'publish'/);
+  assert.doesNotMatch(source, /awaitApproval/);
+});
+
+test('interactive subprocess inherits stdin and displays its output', () => {
+  const source = [
+    "import { ReleaseProgress } from './scripts/release-progress.mjs';",
+    "const progress = new ReleaseProgress();",
+    "await progress.step(1, 1, 'Authenticate', async () => {",
+    "  await progress.command(process.execPath, ['-e',",
+    "    \"process.stdin.once('data', v => { console.log('RECEIVED:' + v.toString().trim()); });\"",
+    "  ], { interactive: true });",
+    "});",
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: path.resolve('.'), input: 'test-otp-input\\n', encoding: 'utf8', timeout: 8_000, windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /RECEIVED:test-otp-input/);
+  assert.match(result.stdout, /Authenticate/);
+});
+
 test('release automation is exposed only as a dedicated package command', () => {
   const manifest = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
   assert.equal(manifest.scripts['release:brc'], 'node scripts/release-brc.mjs');

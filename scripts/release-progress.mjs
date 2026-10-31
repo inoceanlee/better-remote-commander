@@ -14,6 +14,7 @@ export class ReleaseProgress {
     this.timer = null;
     this.child = null;
     this.interrupted = false;
+    this.interactive = false;
     this.onInterrupt = () => {
       this.interrupted = true;
       if (this.child?.pid) {
@@ -32,11 +33,11 @@ export class ReleaseProgress {
   }
 
   clear() {
-    if (this.output.isTTY && this.current) this.output.write('\r\x1b[2K');
+    if (this.output.isTTY && this.current && !this.interactive) this.output.write('\r\x1b[2K');
   }
 
   render() {
-    if (!this.current) return;
+    if (!this.current || this.interactive) return;
     const elapsed = formatSeconds(performance.now() - this.current.started);
     const details = this.current.details ? ' · ' + this.current.details : '';
     if (this.output.isTTY) {
@@ -74,10 +75,15 @@ export class ReleaseProgress {
     }
   }
 
-  async command(file, args, { cwd, env = process.env } = {}) {
+  async command(file, args, { cwd, env = process.env, interactive = false } = {}) {
+    if (interactive) {
+      this.clear();
+      this.interactive = true;
+      this.output.write('\n');
+    }
     const shell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(file);
     const child = spawn(file, args, {
-      cwd, env, shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd, env, shell, windowsHide: true, stdio: interactive ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
     let tail = '';
@@ -96,8 +102,10 @@ export class ReleaseProgress {
       const matches = text.match(/BRC_PROGRESS:(\d{1,3})/g);
       if (matches?.length && that.current) that.current.details = matches.at(-1).slice('BRC_PROGRESS:'.length) + '% gzip';
     }
-    child.stdout.on('data', (data) => capture('stdout', data, this));
-    child.stderr.on('data', (data) => capture('stderr', data, this));
+    if (!interactive) {
+      child.stdout.on('data', (data) => capture('stdout', data, this));
+      child.stderr.on('data', (data) => capture('stderr', data, this));
+    }
     try {
       await new Promise((resolve, reject) => {
         child.once('error', reject);
@@ -106,6 +114,7 @@ export class ReleaseProgress {
       return chunks;
     } finally {
       this.child = null;
+      this.interactive = false;
     }
   }
 }

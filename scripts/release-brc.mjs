@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { createInterface } from 'node:readline/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,12 +16,12 @@ if (process.argv.slice(2).some((arg) => !['--dry-run', '--verbose', '--help'].in
 }
 if (help) {
   console.log('pnpm release:brc [--dry-run] [--verbose]');
-  console.log('Validate, build, test and stage @inoceanlee/brc for browser 2FA approval.');
+  console.log('Validate, build, test and publish @inoceanlee/brc with interactive npm authentication.');
   console.log('Use --dry-run to validate without uploading or tagging.');
   process.exit(0);
 }
 if (!dryRun && !process.stdin.isTTY) {
-  console.error('npm approval requires a local interactive terminal. Run pnpm release:brc locally.');
+  console.error('npm publish requires a local interactive terminal for authentication. Run pnpm release:brc locally.');
   process.exit(2);
 }
 
@@ -78,7 +77,7 @@ function publishedVersion() {
   return JSON.parse(result.stdout.trim());
 }
 function receiptFile(revision) {
-  return path.join(tmpdir(), 'brc-release-stage-' + revision + '.json');
+  return path.join(tmpdir(), 'brc-direct-release-' + revision + '.json');
 }
 async function command(tool, args, options = {}) {
   const executable = executables[tool] ?? { file: tool, prefix: [] };
@@ -87,27 +86,19 @@ async function command(tool, args, options = {}) {
 function saveReceipt(file, data) {
   writeFileSync(file, JSON.stringify(data) + '\n', { flag: 'w', mode: 0o600 });
 }
-async function awaitApproval(version, receipt) {
-  let actual = publishedVersion();
-  if (actual !== version) {
-    const stageList = quick('npm', ['stage', 'list', name, '--registry', registry, '--json']);
-    progress.print('  npm 待审批版本: ' + version);
-    if (verbose) progress.print('  Staged packages: ' + stageList.stdout.trim().slice(0, 1500));
-    progress.print('  在 https://www.npmjs.com 登录，打开 Staged Packages，审核并批准 ' + name + '@' + version + '。');
-    progress.print('  审批需要在 npm 网站完成 2FA；不要将验证码或令牌输入脚本。');
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      await rl.question('  网站批准后，返回终端按 Enter 继续验证（Ctrl+C 可保留待审批版本）：');
-    } finally { rl.close(); }
+async function finishRelease(receipt) {
+  let actual;
+  for (let attempt = 0; attempt < 6; attempt++) {
     actual = publishedVersion();
+    if (actual === receipt.version) break;
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  if (actual !== version) {
-    throw new Error('Registry version not yet approved. Staged version remains available. Rerun pnpm release:brc after approval.');
+  if (actual !== receipt.version) {
+    throw new Error('npm publication is not yet visible. Rerun pnpm release:brc to verify and tag the published version.');
   }
   progress.print('  Registry verified: ' + name + '@' + actual);
-  const tag = receipt.tag;
-  if (!git('tag', '--list', tag)) quick('git', ['tag', tag]);
-  await command('git', ['push', 'origin', tag]);
+  if (!git('tag', '--list', receipt.tag)) quick('git', ['tag', receipt.tag]);
+  await command('git', ['push', 'origin', receipt.tag]);
   rmSync(receiptFile(receipt.revision), { force: true });
   progress.print('  Published and tagged: ' + name + '@' + actual);
 }
@@ -128,23 +119,17 @@ async function main() {
 
   const checkpoint = receiptFile(revision);
   if (existsSync(checkpoint)) {
-    if (dryRun) throw new Error('A release is awaiting approval. Finalize it before starting another dry run.');
+    if (dryRun) throw new Error('A published release is awaiting registry verification. Finish it before another dry run.');
     const saved = JSON.parse(readFileSync(checkpoint, 'utf8'));
     if (saved.revision !== revision || saved.name !== name) throw new Error('Release checkpoint does not match the current source.');
-    progress.print('  Resuming staged release: ' + name + '@' + saved.version);
-    await awaitApproval(saved.version, saved);
+    progress.print('  Resuming release verification: ' + name + '@' + saved.version);
+    await finishRelease(saved);
     return;
   }
   if (git('tag', '--points-at', 'HEAD', '--list', 'brc-v*')) throw new Error('Current source commit already released.');
   const version = versionForRelease(manifest.version, publishedVersion());
   const tag = 'brc-v' + version;
   if (git('tag', '--list', tag)) throw new Error('Release tag already exists: ' + tag);
-  const pending = JSON.parse(quick('npm', ['stage', 'list', name, '--json', '--registry', registry]).stdout.trim());
-  if (!Array.isArray(pending)) throw new Error('Unexpected npm staged package response.');
-  if (pending.length) {
-    const versions = pending.map((item) => item.version + ' (' + item.status + ')').join(', ');
-    throw new Error('An npm staged release already exists: ' + versions + '. Approve or reject it before starting a new release.');
-  }
   progress.print('Release: ' + name + '@' + version);
   const traefik = process.env.BRC_TRAEFIK_TEST_BINARY || path.resolve(root, '../traefik/traefik.exe');
   if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);
@@ -170,15 +155,15 @@ async function main() {
     await command('npm', ['publish', archive, '--dry-run', '--access', 'public', '--registry', registry]);
   });
   if (dryRun) {
-    progress.print('Dry run passed. No package staged or published.');
+    progress.print('Dry run passed. No package published.');
     return;
   }
-  await progress.step(5, 5, '上传 npm 待审批版本', async () => {
-    await command('npm', ['stage', 'publish', archive, '--access', 'public', '--registry', registry]);
+  await progress.step(5, 5, '发布 npm（终端身份认证）', async () => {
+    await command('npm', ['publish', archive, '--access', 'public', '--registry', registry], { interactive: true });
   });
   const receipt = { revision, version, tag, name };
   saveReceipt(checkpoint, receipt);
-  await awaitApproval(version, receipt);
+  await finishRelease(receipt);
 }
 main().catch((error) => {
   console.error('\nRelease stopped: ' + (error instanceof Error ? error.message : String(error)));
