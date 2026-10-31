@@ -10,13 +10,18 @@ import { SqliteStore } from './store/sqlite.js';
 const cfg = loadConfig();
 if (process.argv.includes('--initialize')) {
   try {
-    SqliteStore.initialize(cfg.dbFile);
     const input = process.stdin.isTTY ? '' : readFileSync(0, 'utf8').trim();
+    let administrator: { username: string; password: string } | undefined;
     if (input) {
-      const administrator = JSON.parse(input) as { username?: unknown; password?: unknown };
-      if (typeof administrator.username !== 'string' || typeof administrator.password !== 'string') {
-        throw new Error('Invalid administrator setup input.');
+      const candidate = JSON.parse(input) as { username?: unknown; password?: unknown };
+      if (typeof candidate.username !== 'string' || !candidate.username.trim()
+        || typeof candidate.password !== 'string' || candidate.password.length < 8) {
+        throw new Error('Administrator setup requires a username and password of at least 8 characters.');
       }
+      administrator = { username: candidate.username, password: candidate.password };
+    }
+    SqliteStore.initialize(cfg.dbFile);
+    if (administrator) {
       const store = SqliteStore.open(cfg.dbFile);
       try { store.bootstrapAdministrator(administrator.username, administrator.password); }
       finally { store.close(); }

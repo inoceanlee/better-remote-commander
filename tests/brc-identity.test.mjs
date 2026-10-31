@@ -276,6 +276,24 @@ test('setup initializes a fresh Relay identity once and rejects a missing databa
   }
 });
 
+test('invalid administrator bootstrap input leaves the database absent', () => {
+  for (const input of ['{invalid-json', JSON.stringify({ username: 'alice', password: 'short' })]) {
+    const { directory, file } = tempDatabase();
+    try {
+      const result = spawnSync(process.execPath, [path.resolve('packages/relay/dist/cli.js'), '--initialize'], {
+        cwd: process.cwd(),
+        env: { ...process.env, BRC_DB: file, BRC_LOG_FILE: path.join(directory, 'relay.log') },
+        input,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 10_000,
+      });
+      assert.notEqual(result.status, 0);
+      assert.equal(existsSync(file), false);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
 test('first setup persists administrator hash and session key for subsequent password-free starts', () => {
   const { directory, file } = tempDatabase();
   const env = { ...process.env, BRC_DB: file };
