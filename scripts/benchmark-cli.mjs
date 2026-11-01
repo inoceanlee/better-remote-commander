@@ -1,9 +1,9 @@
-// Run with: node scripts/benchmark-cli.mjs <official-traefik-executable>
-// Prerequisites: install workspace dependencies and build all workspace packages first.
-// This script uses the local built CLI, never a global installation. It retains its
-// temporary directory, including on failure, for inspection and safe manual recovery.
+// Windows: node scripts/benchmark-cli.mjs <absolute-official-traefik-executable>
+// Reuse the same isolated root and ports: node scripts/benchmark-cli.mjs --reuse <root>
+// Install dependencies and build all workspace packages in this worktree first.
+// This uses the local CLI, not a global package. It never removes its temporary root.
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, realpath, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -13,9 +13,11 @@ import { isolatedEnvironment, isAllowedPort, summarize } from './benchmark-cli-h
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(repo, 'packages', 'cli', 'dist', 'cli.js');
-const binary = process.argv[2];
-if (process.platform !== 'win32' || !binary || process.argv.length !== 3 || !path.isAbsolute(binary)) {
-  throw new Error('Windows only. Supply the absolute path to an official Traefik v3.7+ executable.');
+const preload = path.join(repo, 'scripts', 'benchmark-cli-phases.mjs');
+const reuse = process.argv[2] === '--reuse';
+const argument = process.argv[reuse ? 3 : 2];
+if (process.platform !== 'win32' || !argument || !path.isAbsolute(argument) || process.argv.length !== (reuse ? 4 : 3)) {
+  throw new Error('Windows only. Supply an absolute official Traefik path, or --reuse followed by an existing benchmark root.');
 }
 
 async function reservePorts() {
@@ -60,47 +62,118 @@ function run(executable, args, env) {
   });
 }
 
-const scratch = await mkdtemp(path.join(await realpath(tmpdir()), 'brc-benchmark-'));
-const ports = await reservePorts();
+const temp = await realpath(tmpdir());
+let scratch;
+let ports;
+let metadata;
+if (reuse) {
+  scratch = await realpath(argument);
+  if (path.dirname(scratch).toLowerCase() !== temp.toLowerCase() || !path.basename(scratch).startsWith('brc-benchmark-')) {
+    throw new Error('Reuse is limited to an existing brc-benchmark-* directory directly inside the system temporary directory.');
+  }
+  metadata = JSON.parse(await readFile(path.join(scratch, 'benchmark-fixture.json'), 'utf8'));
+  ports = metadata.ports;
+  if (metadata.version !== 1 || !Array.isArray(ports) || ports.length !== 3 || ports.some((p, i) => !Number.isInteger(p) || p < 1024 || p > 65535 || !isAllowedPort(p, ports.slice(0, i)))) {
+    throw new Error('Invalid benchmark fixture metadata.');
+  }
+} else {
+  scratch = await mkdtemp(path.join(temp, 'brc-benchmark-'));
+  ports = await reservePorts();
+}
 const env = isolatedEnvironment(process.env, scratch, ports);
 await mkdir(env.TEMP, { recursive: true });
 console.log(`Isolated benchmark data: ${scratch}`);
 console.log(`Loopback ports: ${ports.join(', ')}`);
-const report = { root: scratch, ports, samples: {}, stages: { available: false, reason: 'The CLI does not expose internal stage timings. Command wall times are recorded separately.' } };
+const runId = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+const reportFile = path.join(scratch, `benchmark-${runId}.json`);
+const phaseFile = path.join(scratch, `benchmark-${runId}-phases.jsonl`);
+const report = { root: scratch, ports, samples: {}, phases: { file: phaseFile, note: 'Separate instrumented cycle; nested phase times overlap. Cleanup and standalone identity query timings are not exposed by the CLI.' } };
+const cliRun = (command, diagnostic = false) => run(process.execPath, diagnostic ? ['--import', preload, cli, command] : [cli, command], diagnostic ? { ...env, BENCHMARK_PHASE_FILE: phaseFile } : env);
+async function assertState(expected) {
+  const result = await cliRun('status');
+  for (const service of ['relay', 'traefik', 'agent']) {
+    if (!new RegExp(`^${service}: ${expected}(?:\\s|$)`, 'm').test(result.stdout)) {
+      throw new Error(`Expected ${service} ${expected}, got status:\n${result.stdout}`);
+    }
+  }
+}
+async function waitFor(action, description) {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const result = await action();
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error(`Timed out waiting for ${description}.`);
+}
+async function pair(password) {
+  await cliRun('start');
+  const code = await waitFor(async () => {
+    try { return (await readFile(path.join(scratch, 'logs', 'agent.log'), 'utf8')).match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1]; }
+    catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  }, 'agent pairing code');
+  const base = `http://127.0.0.1:${ports[1]}`;
+  const login = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ username: 'admin', password, returnTo: '/' }) });
+  const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+  if (!cookie || login.status !== 302) throw new Error(`Isolated administrator login failed: HTTP ${login.status}`);
+  const approval = await fetch(`${base}/device/approve`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ user_code: code, decision: 'allow' }) });
+  if (approval.status !== 200) throw new Error(`Isolated pairing approval failed: HTTP ${approval.status}`);
+  await waitFor(async () => {
+    const response = await fetch(`${base}/health`);
+    return response.ok && (await response.json()).devices === 1;
+  }, 'paired agent connection');
+  await assertState('running');
+  await cliRun('stop');
+  await assertState('stopped');
+}
 try {
-  const official = await realpath(binary);
-  const versionOutput = await run(official, ['version'], env);
-  const version = versionOutput.stdout.match(/Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
-  if (!version) throw new Error('Cannot determine Traefik version.');
-  const [major, minor] = version.split('.').map(Number);
-  if (major < 3 || (major === 3 && minor < 7)) throw new Error('Traefik v3.7 or later is required.');
-  report.traefikVersion = version;
-  const versionDir = path.join(scratch, 'traefik', 'versions', version);
-  await mkdir(versionDir, { recursive: true });
-  await copyFile(official, path.join(versionDir, 'traefik.exe'));
-  await writeFile(path.join(scratch, 'traefik', 'versions.json'), JSON.stringify({ version: 1, current: version, previous: null }));
-  // This fresh root is staged before setup. The marker enables the CLI's supported
-  // interrupted-setup recovery path without permitting a replacement identity.
-  await mkdir(path.join(scratch, 'data'), { recursive: true });
-  await writeFile(path.join(scratch, 'data', 'relay.sqlite.setup-pending'), '', { flag: 'wx' });
-  const setupEnv = { ...env, BRC_ADMIN_USER: 'admin', BRC_ADMIN_PASSWORD: randomBytes(24).toString('hex') };
-  await run(process.execPath, [cli, 'setup'], setupEnv);
+  if (!reuse) {
+    const official = await realpath(argument);
+    const versionOutput = await run(official, ['version'], env);
+    const version = versionOutput.stdout.match(/Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
+    if (!version) throw new Error('Cannot determine Traefik version.');
+    const [major, minor] = version.split('.').map(Number);
+    if (major < 3 || (major === 3 && minor < 7)) throw new Error('Traefik v3.7 or later is required.');
+    const versionDir = path.join(scratch, 'traefik', 'versions', version);
+    await mkdir(versionDir, { recursive: true });
+    await copyFile(official, path.join(versionDir, 'traefik.exe'));
+    await writeFile(path.join(scratch, 'traefik', 'versions.json'), JSON.stringify({ version: 1, current: version, previous: null }));
+    await mkdir(path.join(scratch, 'data'), { recursive: true });
+    await writeFile(path.join(scratch, 'data', 'relay.sqlite.setup-pending'), '', { flag: 'wx' });
+    const password = randomBytes(24).toString('hex');
+    await run(process.execPath, [cli, 'setup'], { ...env, BRC_ADMIN_USER: 'admin', BRC_ADMIN_PASSWORD: password });
+    await pair(password);
+    metadata = { version: 1, ports, traefikVersion: version };
+    await writeFile(path.join(scratch, 'benchmark-fixture.json'), JSON.stringify(metadata), { flag: 'wx' });
+  }
+  report.traefikVersion = metadata.traefikVersion;
+  await assertState('stopped');
   const samples = { coldStart: [], repeatedStart: [], status: [], help: [], stop: [] };
   for (let i = 0; i < 5; i++) {
+    await assertState('stopped');
     for (const [label, command] of [['coldStart', 'start'], ['repeatedStart', 'start'], ['status', 'status'], ['help', 'help'], ['stop', 'stop']]) {
-      const result = await run(process.execPath, [cli, command], env);
+      const result = await cliRun(command);
       samples[label].push(result.ms);
       report.samples[label] = samples[label];
-      await writeFile(path.join(scratch, 'benchmark.json'), JSON.stringify(report, null, 2));
+      await writeFile(reportFile, JSON.stringify(report, null, 2));
+      if (label === 'coldStart' || label === 'repeatedStart') await assertState('running');
+      if (label === 'stop') await assertState('stopped');
     }
   }
   report.results = Object.fromEntries(Object.entries(samples).map(([label, values]) => [label, summarize(values)]));
-  await writeFile(path.join(scratch, 'benchmark.json'), JSON.stringify(report, null, 2));
+  // Record nested method timings separately so instrumentation does not alter samples.
+  await cliRun('start', true);
+  await assertState('running');
+  await cliRun('start', true);
+  await cliRun('status', true);
+  await cliRun('help', true);
+  await cliRun('stop', true);
+  await assertState('stopped');
+  await writeFile(reportFile, JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report.results, null, 2));
-  console.log(`Results: ${path.join(scratch, 'benchmark.json')}`);
+  console.log(`Results: ${reportFile}`);
+  console.log(`Phase timings: ${phaseFile}`);
 } catch (error) {
-  // Do not kill processes or delete files after an uncertain failure. The isolated
-  // root and its process records remain available for identity-checked recovery.
   console.error(`Benchmark failed. No automatic stop or deletion was attempted. Inspect ${scratch}.`);
   throw error;
 }
