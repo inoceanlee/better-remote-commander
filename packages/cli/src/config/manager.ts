@@ -1,4 +1,5 @@
-import { lstat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { BrcPaths } from './paths.js';
 import {
@@ -59,6 +60,51 @@ function defaultSettings(env: NodeJS.ProcessEnv): LoadedSettings {
   return { ...resolveSettings({ version: 1 }, env), rawContents: null };
 }
 
+interface ConfigGeneration {
+  state: 'pending' | 'committed';
+  id: string;
+}
+
+async function readGeneration(paths: BrcPaths): Promise<ConfigGeneration | null> {
+  let text: string;
+  try {
+    text = await readFile(path.join(paths.config, 'brc.yaml.generation'), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('Invalid configuration transaction marker.');
+  }
+  if (!value || typeof value !== 'object' || !('state' in value) || !('id' in value)
+    || (value.state !== 'pending' && value.state !== 'committed')
+    || typeof value.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.id)) {
+    throw new Error('Invalid configuration transaction marker.');
+  }
+  return value as ConfigGeneration;
+}
+
+async function writeGeneration(paths: BrcPaths, state: ConfigGeneration['state']): Promise<void> {
+  const filename = path.join(paths.config, 'brc.yaml.generation');
+  const temporary = `${filename}.${randomUUID()}.tmp`;
+  await mkdir(paths.config, { recursive: true });
+  try {
+    await writeFile(temporary, JSON.stringify({ state, id: randomUUID() }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    await rename(temporary, filename);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function beginTransaction(paths: BrcPaths): Promise<void> {
+  const current = await readGeneration(paths);
+  if (current?.state === 'pending') throw new Error('An incomplete configuration transaction requires manual recovery.');
+  await writeGeneration(paths, 'pending');
+}
+
 export class SettingsManager {
   private constructor(
     private readonly paths: BrcPaths,
@@ -77,15 +123,6 @@ export class SettingsManager {
       throw new Error('SettingsManager requires a lifecycle lock and an apply operation.');
     }
     const runtimeEnv = { ...env };
-    const lockActive = async () => {
-      try {
-        await lstat(path.join(paths.runtime, 'lifecycle.lock'));
-        return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-        throw error;
-      }
-    };
     const read = async () => {
       const lastGood = await readLastGoodSettings(paths, runtimeEnv);
       let loaded: LoadedSettings;
@@ -97,33 +134,36 @@ export class SettingsManager {
       }
       return { loaded, lastGood };
     };
-    const readCommitted = async () => {
-      const lastGood = await readLastGoodSettings(paths, runtimeEnv);
-      return { loaded: lastGood ?? defaultSettings(runtimeEnv), lastGood };
-    };
-    let initial: { loaded: LoadedSettings; lastGood: LoadedSettings | null };
-    if (await lockActive()) {
-      initial = await readCommitted();
-    } else {
+    const lockedRead = async () => dependencies.lock.runExclusive(async () => {
+      const generation = await readGeneration(paths);
+      if (generation?.state === 'pending') throw new Error('An incomplete configuration transaction requires manual recovery.');
+      const current = await read();
+      if (!current.lastGood && current.loaded.rawContents !== null) {
+        await beginTransaction(paths);
+        await writeLastGoodText(paths, current.loaded.rawContents);
+        await writeGeneration(paths, 'committed');
+        return { loaded: current.loaded, lastGood: current.loaded };
+      }
+      if (!generation) await writeGeneration(paths, 'committed');
+      return current;
+    });
+    const before = await readGeneration(paths);
+    let initial: { loaded: LoadedSettings; lastGood: LoadedSettings | null } | undefined;
+    if (before?.state === 'committed') {
+      let failure: unknown;
       try {
         initial = await read();
       } catch (error) {
-        if (!await lockActive()) throw error;
-        initial = await readCommitted();
+        failure = error;
       }
-      if (await lockActive()) initial = await readCommitted();
+      const after = await readGeneration(paths);
+      if (!after || after.state !== 'committed' || after.id !== before.id) {
+        initial = undefined;
+      } else if (failure !== undefined) {
+        throw failure;
+      }
     }
-    if (await lockActive()) initial = await readCommitted();
-    else if (!initial.lastGood && initial.loaded.rawContents !== null) {
-      initial = await dependencies.lock.runExclusive(async () => {
-        const current = await read();
-        if (!current.lastGood && current.loaded.rawContents !== null) {
-          await writeLastGoodText(paths, current.loaded.rawContents);
-          return { loaded: current.loaded, lastGood: current.loaded };
-        }
-        return current;
-      });
-    }
+    if (!initial || (!initial.lastGood && initial.loaded.rawContents !== null)) initial = await lockedRead();
     return new SettingsManager(paths, runtimeEnv, dependencies, initial.loaded, initial.lastGood);
   }
 
@@ -143,16 +183,28 @@ export class SettingsManager {
 
   async ensureConfigFile(): Promise<void> {
     await this.dependencies.lock.runExclusive(async () => {
-      if (this.loaded.rawContents !== null) return;
+      const generation = await readGeneration(this.paths);
+      if (generation?.state === 'pending') throw new Error('An incomplete configuration transaction requires manual recovery.');
       const current = await readSettings(this.paths, this.env);
+      const lastGood = await readLastGoodSettings(this.paths, this.env);
       if (current.rawContents !== null) {
+        if (!lastGood) {
+          await beginTransaction(this.paths);
+          await writeLastGoodText(this.paths, current.rawContents);
+          await writeGeneration(this.paths, 'committed');
+        } else if (!generation) {
+          await writeGeneration(this.paths, 'committed');
+        }
         this.loaded = current;
+        this.lastGood = lastGood ?? current;
         return;
       }
 
+      await beginTransaction(this.paths);
       const contents = await writeSettings(this.paths, current.fileSettings);
       const initialized = { ...current, rawContents: contents };
       await writeLastGoodText(this.paths, contents);
+      await writeGeneration(this.paths, 'committed');
       this.loaded = initialized;
       this.lastGood = initialized;
     });
@@ -168,11 +220,15 @@ export class SettingsManager {
       try {
         current = await readSettings(this.paths, this.env);
       } catch (error) {
-        if (error instanceof InvalidConfigurationFileError) await this.rollback(previous, error);
+        if (error instanceof InvalidConfigurationFileError) {
+          await beginTransaction(this.paths);
+          await this.rollback(previous, error);
+        }
         throw error;
       }
       const fileSettings = withSettingValue(current.fileSettings, key, value);
       const next = resolveSettings(fileSettings, this.env);
+      await beginTransaction(this.paths);
       const contents = await writeSettings(this.paths, next.fileSettings);
       const nextLoaded = { ...next, rawContents: contents };
       try {
@@ -181,6 +237,7 @@ export class SettingsManager {
       } catch (error) {
         await this.rollback(previous, error, true);
       }
+      await writeGeneration(this.paths, 'committed');
       this.loaded = nextLoaded;
       this.lastGood = nextLoaded;
       return { restartRequired: requiresRestart(previous.settings, next.settings) };
@@ -194,9 +251,13 @@ export class SettingsManager {
       try {
         next = await readSettings(this.paths, this.env);
       } catch (error) {
-        if (error instanceof InvalidConfigurationFileError) await this.rollback(previous, error);
+        if (error instanceof InvalidConfigurationFileError) {
+          await beginTransaction(this.paths);
+          await this.rollback(previous, error);
+        }
         throw error;
       }
+      await beginTransaction(this.paths);
       try {
         await this.dependencies.apply(next.settings, previous.settings);
         if (next.rawContents === null) await removeLastGoodFile(this.paths);
@@ -204,6 +265,7 @@ export class SettingsManager {
       } catch (error) {
         await this.rollback(previous, error, true);
       }
+      await writeGeneration(this.paths, 'committed');
       this.loaded = next;
       this.lastGood = next.rawContents === null ? null : next;
       return { restartRequired: requiresRestart(previous.settings, next.settings) };
@@ -235,6 +297,7 @@ export class SettingsManager {
     if (failures.length > 1) {
       throw new AggregateError(failures, 'Configuration failed and rollback was incomplete.');
     }
+    await writeGeneration(this.paths, 'committed');
     throw cause;
   }
 }

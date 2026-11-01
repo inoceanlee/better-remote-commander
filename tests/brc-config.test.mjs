@@ -77,12 +77,12 @@ test('loading valid settings with last-good does not take the lifecycle lock', a
   assert.equal(locks, 0);
 });
 
-test('load observes last-good while a concurrent setting change is uncommitted', async (t) => {
+test('load refuses an uncommitted concurrent setting change', async (t) => {
   let release;
   let entered;
   const applying = new Promise((resolve) => { entered = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
-  const { manager, paths, env, lock } = await createFixture(t, {
+  const { manager, paths, env } = await createFixture(t, {
     apply: async (settings) => {
       if (settings.services.relayPort === 3100) {
         entered();
@@ -96,12 +96,35 @@ test('load observes last-good while a concurrent setting change is uncommitted',
   const pending = manager.set('services.relayPort', 3100);
   await applying;
   try {
-    const observed = await SettingsManager.load(paths, env, { lock, apply: async () => {} });
-    assert.equal(observed.get('services.relayPort').value, 3000);
+    await assert.rejects(
+      SettingsManager.load(paths, env, { lock: new LifecycleLock(paths), apply: async () => {} }),
+      /in progress|incomplete configuration transaction/i,
+    );
   } finally {
     release();
     await assert.rejects(pending, /apply failed/);
   }
+});
+
+test('pending transaction marker fails closed after an interrupted writer', async (t) => {
+  const { paths, env } = await createFixture(t);
+  t.after(() => rm(paths.root, { recursive: true, force: true }));
+  await writeFile(path.join(paths.config, 'brc.yaml.generation'), JSON.stringify({
+    state: 'pending', id: '00000000-0000-4000-8000-000000000001',
+  }));
+  await assert.rejects(
+    SettingsManager.load(paths, env, { lock: new LifecycleLock(paths), apply: async () => {} }),
+    /incomplete configuration transaction/i,
+  );
+});
+
+test('setup rereads the config file under the lock before deciding whether to create it', async (t) => {
+  const { manager, paths } = await createFixture(t);
+  t.after(() => rm(paths.root, { recursive: true, force: true }));
+  await manager.ensureConfigFile();
+  await rm(path.join(paths.config, 'brc.yaml'));
+  await manager.ensureConfigFile();
+  assert.match(await readFile(path.join(paths.config, 'brc.yaml'), 'utf8'), /version: 1/);
 });
 
 test('public URL setting persists, validates origins and marks restart required', async (t) => {
