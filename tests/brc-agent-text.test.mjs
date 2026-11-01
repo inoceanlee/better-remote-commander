@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -47,6 +48,23 @@ test('uses the default read limit unless a caller supplies a length', async () =
   });
 });
 
+test('applies the configured read limit when length is omitted', async () => {
+  const { configManager } = await import('../packages/agent/dist/core/config-manager.js');
+  const { handleReadFile } = await import('../packages/agent/dist/core/handlers/filesystem-handlers.js');
+  const originalGetConfig = configManager.getConfig;
+  configManager.getConfig = async () => ({ fileReadLineLimit: 2, allowedDirectories: [] });
+  try {
+    await withFile('one\ntwo\nthree', async (file) => {
+      const result = await handleReadFile({ path: file });
+      assert.match(result.content[0].text, /\n\none\ntwo$/);
+      const explicit = await handleReadFile({ path: file, length: 1 });
+      assert.match(explicit.content[0].text, /\n\none$/);
+    });
+  } finally {
+    configManager.getConfig = originalGetConfig;
+  }
+});
+
 test('reads long lines and reports the requested page', async () => {
   const long = 'x'.repeat(100000);
   await withFile(`one\n${long}\nthree`, async (file, handler) => {
@@ -58,6 +76,31 @@ test('reads the end of a large file without losing the last line', async () => {
   await withFile(`${'x'.repeat(11 * 1024 * 1024)}\nalpha\nbeta\n`, async (file, handler) => {
     assert.equal((await handler.read(file, { offset: -2, includeStatusMessage: false })).content, 'alpha\nbeta');
   });
+});
+
+test('bounds reverse reads with and without a trailing newline', async () => {
+  for (const suffix of ['\nalpha\nbeta', '\nalpha\nbeta\n']) {
+    await withFile(`${'x'.repeat(11 * 1024 * 1024)}${suffix}`, async (file, handler) => {
+      const originalOpen = fs.open;
+      let bytesRead = 0;
+      fs.open = async (...args) => {
+        const handle = await originalOpen(...args);
+        const originalRead = handle.read.bind(handle);
+        handle.read = async (...readArgs) => {
+          const result = await originalRead(...readArgs);
+          bytesRead += result.bytesRead;
+          return result;
+        };
+        return handle;
+      };
+      try {
+        assert.equal((await handler.read(file, { offset: -2, includeStatusMessage: false })).content, 'alpha\nbeta');
+        assert.ok(bytesRead <= 8194, `read ${bytesRead} bytes`);
+      } finally {
+        fs.open = originalOpen;
+      }
+    });
+  }
 });
 
 test('appends and rewrites without changing write semantics', async () => {

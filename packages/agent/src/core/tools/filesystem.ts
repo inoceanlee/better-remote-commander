@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import { capture } from '../utils/capture.js';
 import { withTimeout, runWithAbortableTimeout } from '../utils/withTimeout.js';
 import { configManager } from '../config-manager.js';
+import { AGENT_DEFAULTS } from '../config.js';
 import { getFileHandler, TextFileHandler } from '../utils/files/index.js';
 import type { ReadOptions, FileResult, PdfPageItem } from '../utils/files/base.js';
 import { isPdfFile } from "./mime-types.js";
@@ -62,7 +63,7 @@ function getFileExtension(filePath: string): string {
  */
 async function getDefaultReadLength(): Promise<number> {
     const config = await configManager.getConfig();
-    return config.fileReadLineLimit ?? 1000; // Default to 1000 lines if not set
+    return config.fileReadLineLimit ?? AGENT_DEFAULTS.fileReadLineLimit;
 }
 
 /**

@@ -133,8 +133,9 @@ export class TextReader {
             let position = fileSize;
             const chunks: Buffer[] = [];
             let newlineCount = 0;
+            let requiredNewlines = n;
 
-            while (position > 0 && newlineCount <= n) {
+            while (position > 0 && newlineCount < requiredNewlines) {
                 if (signal?.aborted) {
                     const err = new Error('Read aborted') as NodeJS.ErrnoException;
                     err.code = 'ABORT_ERR';
@@ -145,6 +146,9 @@ export class TextReader {
 
                 const buffer = Buffer.alloc(readSize);
                 await fd.read(buffer, 0, readSize, position);
+                if (chunks.length === 0 && buffer[readSize - 1] === 0x0a) {
+                    requiredNewlines++;
+                }
 
                 chunks.push(buffer);
                 for (const byte of buffer) {

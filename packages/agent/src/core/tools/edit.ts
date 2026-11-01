@@ -25,6 +25,7 @@ import { EditBlockArgsSchema } from "./schemas.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
 import { configManager } from '../config-manager.js';
+import { AGENT_DEFAULTS } from '../config.js';
 import { fuzzySearchLogger, type FuzzySearchLogEntry } from '../utils/fuzzySearchLogger.js';
 import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
 import { resolveAbsolutePath } from '../handlers/filesystem-handlers.js';
@@ -152,7 +153,7 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
     
     // Get the line limit from configuration
     const config = await configManager.getConfig();
-    const MAX_LINES = config.fileWriteLineLimit ?? 50; // Default to 50 if not set
+    const MAX_LINES = config.fileWriteLineLimit ?? AGENT_DEFAULTS.fileWriteLineLimit;
     
     // Detect file's line ending style
     const fileLineEnding = detectLineEnding(content);

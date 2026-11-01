@@ -6,6 +6,7 @@ import { ServerResult } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
 import * as os from 'os';
 import { configManager } from '../config-manager.js';
+import { AGENT_DEFAULTS } from '../config.js';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
@@ -250,7 +251,7 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
 
   // Get default line limit from config
   const config = await configManager.getConfig();
-  const defaultLength = config.fileReadLineLimit ?? 1000;
+  const defaultLength = config.fileReadLineLimit ?? AGENT_DEFAULTS.fileReadLineLimit;
 
   const { 
     pid, 
@@ -407,7 +408,7 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
 
   // Get config for output line limit
   const config = await configManager.getConfig();
-  const maxOutputLines = config.fileReadLineLimit ?? 1000;
+  const maxOutputLines = config.fileReadLineLimit ?? AGENT_DEFAULTS.fileReadLineLimit;
 
   // Check if this is a virtual Node session (node:local)
   if (virtualNodeSessions.has(pid)) {
