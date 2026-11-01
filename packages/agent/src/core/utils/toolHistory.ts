@@ -1,7 +1,6 @@
 import { ServerResult } from '../types.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import { resolveAgentHome } from '../config.js';
+import { ToolHistoryStorage } from './toolHistoryStorage.js';
 
 export interface ToolCallRecord {
   timestamp: string;
@@ -27,6 +26,18 @@ function formatLocalTimestamp(isoTimestamp: string): string {
     second: '2-digit',
     hour12: false
   });
+}
+
+function trimHistory(lines: string[], targetBytes: number): string[] {
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const lineBytes = Buffer.byteLength(lines[i], 'utf-8') + 1;
+    if (kept.length > 0 && bytes + lineBytes > targetBytes) break;
+    kept.push(lines[i]);
+    bytes += lineBytes;
+  }
+  return kept.reverse();
 }
 
 class ToolHistory {
@@ -56,22 +67,13 @@ class ToolHistory {
   // all the way to zero, so a single overflow doesn't cause every subsequent
   // flush to re-trim.
   private readonly HISTORY_FILE_TRIM_TARGET_BYTES = 4 * 1024 * 1024;
-  private readonly historyFile: string;
+  private readonly storage: ToolHistoryStorage;
   private writeQueue: ToolCallRecord[] = [];
   private isWriting = false;
   private writeInterval?: NodeJS.Timeout;
 
   constructor() {
-    // Store history in same directory as config to keep everything together
-    const historyDir = (process.env.BRC_HOME ?? path.join(os.homedir(), '.brc'));
-    
-    // Ensure directory exists
-    if (!fs.existsSync(historyDir)) {
-      fs.mkdirSync(historyDir, { recursive: true });
-    }
-    
-    // Use append-only JSONL format (JSON Lines)
-    this.historyFile = path.join(historyDir, 'tool-history.jsonl');
+    this.storage = new ToolHistoryStorage(resolveAgentHome(process.env));
     
     // Load existing history on startup
     this.loadFromDisk();
@@ -85,15 +87,14 @@ class ToolHistory {
    */
   private loadFromDisk(): void {
     try {
-      if (!fs.existsSync(this.historyFile)) {
-        return;
-      }
+      if (this.storage.size() === 0) return;
 
       // If the file is over the cap, trim it down before reading so we
       // load a bounded amount.
       this.trimHistoryFileIfTooLarge();
 
-      const content = fs.readFileSync(this.historyFile, 'utf-8');
+      const content = this.storage.readText();
+      if (content === null) return;
       const lines = content.trim().split('\n').filter(line => line.trim());
 
       // Parse each line as JSON
@@ -135,42 +136,17 @@ class ToolHistory {
    * exceeds the trim target — there is no useful state below that.
    */
   private trimHistoryFileIfTooLarge(): boolean {
-    let stats: fs.Stats;
     try {
-      if (!fs.existsSync(this.historyFile)) {
-        return false;
-      }
-      stats = fs.statSync(this.historyFile);
-      if (stats.size <= this.MAX_HISTORY_FILE_SIZE_BYTES) {
-        return false;
-      }
-    } catch (error) {
-      return false;
-    }
-
-    try {
-      const content = fs.readFileSync(this.historyFile, 'utf-8');
+      if (this.storage.size() <= this.MAX_HISTORY_FILE_SIZE_BYTES) return false;
+      const content = this.storage.readText();
+      if (content === null) return false;
       const lines = content.split('\n').filter(line => line.length > 0);
       if (lines.length === 0) {
         return false;
       }
 
-      // Walk lines from newest to oldest, accumulating bytes (line + '\n'),
-      // and keep as many as fit within the trim target. Always keep at
-      // least the last line.
-      const kept: string[] = [];
-      let bytes = 0;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const lineBytes = Buffer.byteLength(lines[i], 'utf-8') + 1; // +1 for '\n'
-        if (kept.length > 0 && bytes + lineBytes > this.HISTORY_FILE_TRIM_TARGET_BYTES) {
-          break;
-        }
-        kept.push(lines[i]);
-        bytes += lineBytes;
-      }
-      kept.reverse();
-
-      fs.writeFileSync(this.historyFile, kept.join('\n') + '\n', 'utf-8');
+      const kept = trimHistory(lines, this.HISTORY_FILE_TRIM_TARGET_BYTES);
+      this.storage.rewriteText(kept.join('\n') + '\n');
       return true;
     } catch (error) {
       // Trim failed; do not claim the file was changed.
@@ -188,7 +164,7 @@ class ToolHistory {
 
       // Write them back
       const lines = keepEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-      fs.writeFileSync(this.historyFile, lines, 'utf-8');
+      this.storage.rewriteText(lines);
     } catch (error) {
       // Silently fail
     }
@@ -227,7 +203,7 @@ class ToolHistory {
 
       // Append to file (atomic append operation)
       const lines = toWrite.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-      fs.appendFileSync(this.historyFile, lines, 'utf-8');
+      this.storage.appendText(lines);
     } catch (error) {
       // Put back in queue on failure
       this.writeQueue.unshift(...toWrite);
@@ -342,7 +318,7 @@ class ToolHistory {
       totalEntries: this.history.length,
       oldestEntry: this.history[0]?.timestamp,
       newestEntry: this.history[this.history.length - 1]?.timestamp,
-      historyFile: this.historyFile,
+      historyFile: this.storage.file,
       queuedWrites: this.writeQueue.length
     };
   }

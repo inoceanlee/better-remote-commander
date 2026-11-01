@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
+import { resolveAgentHome } from '../config.js';
 import { appendRotatingLog } from 'brc-shared';
 
 export interface FuzzySearchLogEntry {
@@ -47,7 +47,7 @@ class FuzzySearchLogger {
 
     constructor() {
         // Create log file in a dedicated directory
-        const logDir = path.join(process.env.BRC_HOME ?? path.join(os.homedir(), '.brc'), 'logs');
+        const logDir = path.join(resolveAgentHome(process.env), 'logs');
         this.logPath = path.join(logDir, 'fuzzy-search.log');
     }
 
