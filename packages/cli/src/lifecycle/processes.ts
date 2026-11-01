@@ -423,7 +423,9 @@ export class ProcessManager {
         if (health.ok && health.state === 'running') return;
         if (spec.name === 'agent' && health.state === 'pairing') return;
       } catch (error) {
-        if (getExit() || child.exitCode !== null || child.signalCode !== null) throw error;
+        if (getExit() || child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(`${spec.name} exited during startup.`, { cause: error });
+        }
         detail = processErrorMessage(error);
       }
       await sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
