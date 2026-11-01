@@ -1,16 +1,17 @@
-import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_CONFIG } from './release-config.mjs';
+import { ReleaseArtifactStore, ReleaseLock } from './release-artifact.mjs';
 import { ReleaseProgress } from './release-progress.mjs';
+import { ReleaseRunner } from './release-runner.mjs';
 import { withReleaseWorkspace } from './release-workspace.mjs';
-import { registryRepublishAt } from './npm-registry-policy.mjs';
+import { assertRegistryIntegrity, registryRepublishAt } from './npm-registry-policy.mjs';
 import { assertReleaseVersion } from './release-version.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const name = '@inoceanlee/brc';
-const registry = 'https://registry.npmjs.org/';
 const dryRun = process.argv.includes('--dry-run');
 const verbose = process.argv.includes('--verbose');
 const help = process.argv.includes('--help');
@@ -29,10 +30,12 @@ if (!dryRun && !process.stdin.isTTY) {
 }
 
 const progress = new ReleaseProgress({ verbose });
-function binary(command) {
-  if (process.platform !== 'win32' || !['pnpm', 'npm'].includes(command)) {
-    return { file: command, prefix: [] };
-  }
+const runner = new ReleaseRunner();
+const store = new ReleaseArtifactStore();
+const lock = new ReleaseLock(path.join(RELEASE_CONFIG.artifactDirectory, '.release-lock'));
+
+function resolveBinary(command) {
+  if (process.platform !== 'win32' || !['pnpm', 'npm'].includes(command)) return { file: command, prefix: [] };
   const found = spawnSync('where.exe', [command], { encoding: 'utf8', windowsHide: true });
   if (found.status !== 0) throw new Error('Missing ' + command + ' on PATH.');
   const files = found.stdout.split(/\r?\n/).filter(Boolean);
@@ -47,7 +50,8 @@ function binary(command) {
   if (!executable) throw new Error('Cannot locate pnpm executable.');
   return { file: executable, prefix: [] };
 }
-const executables = Object.fromEntries(['git', 'npm', 'pnpm'].map((cmd) => [cmd, binary(cmd)]));
+const executables = Object.fromEntries(['git', 'npm', 'pnpm'].map((command) => [command, resolveBinary(command)]));
+
 function quick(command, args, { allowFailure = false } = {}) {
   const executable = executables[command] ?? { file: command, prefix: [] };
   const result = spawnSync(executable.file, [...executable.prefix, ...args], {
@@ -61,108 +65,164 @@ function quick(command, args, { allowFailure = false } = {}) {
   return result;
 }
 const git = (...args) => quick('git', args).stdout.trim();
-function publishedVersion() {
-  const result = quick('npm', ['view', name, 'version', '--json', '--registry', registry], { allowFailure: true });
+
+async function command(tool, args, options = {}) {
+  const executable = executables[tool] ?? { file: tool, prefix: [] };
+  return runner.run(executable.file, [...executable.prefix, ...args], {
+    cwd: root,
+    ...options,
+    onOutput(stream, text) {
+      options.onOutput?.(stream, text);
+      const details = text.match(/BRC_DETAIL:([^\r\n]+)/g);
+      if (details) progress.detail(details.at(-1).slice('BRC_DETAIL:'.length));
+      const percentages = text.match(/BRC_PROGRESS:(\d{1,3})/g);
+      if (percentages) progress.detail(percentages.at(-1).slice('BRC_PROGRESS:'.length) + '% gzip');
+    },
+  });
+}
+
+function hashBuildInputs(revision) {
+  const files = ['pnpm-lock.yaml', 'scripts/pack-brc.mjs', 'scripts/release-config.mjs', 'scripts/release-artifact.mjs'];
+  const hash = createHash('sha256').update(revision);
+  for (const filename of files.sort()) hash.update(filename).update(readFileSync(path.join(root, filename)));
+  return hash.digest('hex');
+}
+
+function registryVersion(version) {
+  const result = quick('npm', ['view', RELEASE_CONFIG.packageName + '@' + version, '--json', '--registry', RELEASE_CONFIG.registry], { allowFailure: true });
   if (result.status !== 0) {
     const details = (result.stderr || '') + (result.stdout || '');
     const retryAt = registryRepublishAt(details);
-    if (retryAt && !dryRun) {
-      throw new Error('npm registry is reserving this unpublished package name until ' + retryAt + ' (UTC). Do not retry publishing before then.');
-    }
-    if (/E404|Not Found|Unpublished on/i.test(details)) return null;
-    throw new Error('Registry lookup failed: ' + (result.stderr || result.stdout).slice(-800));
+    if (retryAt) throw new Error('npm registry is reserving this package name until ' + retryAt + ' (UTC).');
+    if (/E404|Not Found/i.test(details)) return null;
+    throw new Error('Registry lookup failed: ' + details.slice(-800));
   }
   return JSON.parse(result.stdout.trim());
 }
-function receiptFile(revision) {
-  return path.join(tmpdir(), 'brc-direct-release-' + revision + '.json');
-}
-async function command(tool, args, options = {}) {
-  const executable = executables[tool] ?? { file: tool, prefix: [] };
-  return progress.command(executable.file, [...executable.prefix, ...args], { cwd: root, ...options });
-}
-function saveReceipt(file, data) {
-  writeFileSync(file, JSON.stringify(data) + '\n', { flag: 'w', mode: 0o600 });
-}
-async function finishRelease(receipt) {
-  let actual;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    actual = publishedVersion();
-    if (actual === receipt.version) break;
-    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 2000));
+
+function publishedVersion() {
+  const result = quick('npm', ['view', RELEASE_CONFIG.packageName, 'version', '--json', '--registry', RELEASE_CONFIG.registry], { allowFailure: true });
+  if (result.status !== 0) {
+    const details = (result.stderr || '') + (result.stdout || '');
+    if (/E404|Not Found/i.test(details)) return null;
+    const retryAt = registryRepublishAt(details);
+    if (retryAt) throw new Error('npm registry is reserving this package name until ' + retryAt + ' (UTC).');
+    throw new Error('Registry lookup failed: ' + details.slice(-800));
   }
-  if (actual !== receipt.version) {
-    throw new Error('npm publication is not yet visible. Rerun pnpm release:brc to verify and tag the published version.');
-  }
-  progress.print('  Registry verified: ' + name + '@' + actual);
-  if (!git('tag', '--list', receipt.tag)) quick('git', ['tag', receipt.tag]);
-  await command('git', ['push', 'origin', receipt.tag]);
-  rmSync(receiptFile(receipt.revision), { force: true });
-  progress.print('  Published and tagged: ' + name + '@' + actual);
+  return JSON.parse(result.stdout.trim());
 }
-async function main() {
-  if (git('branch', '--show-current') !== 'main') throw new Error('Run releases from main.');
+
+async function verifyAndTag(artifact) {
+  let metadata = null;
+  for (let attempt = 0; attempt < RELEASE_CONFIG.registryAttempts; attempt++) {
+    metadata = registryVersion(artifact.version);
+    if (metadata) break;
+    if (attempt + 1 < RELEASE_CONFIG.registryAttempts) await new Promise((resolve) => setTimeout(resolve, RELEASE_CONFIG.registryPollMs));
+  }
+  if (!metadata) throw new Error('Registry publication is not visible yet. Keep the release checkpoint and rerun to verify.');
+  assertRegistryIntegrity(artifact, metadata);
+  progress.print('  Registry content verified: ' + artifact.name + '@' + artifact.version);
+
+  const localResult = quick('git', ['rev-parse', '--verify', artifact.tag + '^{commit}'], { allowFailure: true });
+  const local = localResult.status === 0 ? localResult.stdout.trim() : '';
+  if (local && local !== artifact.revision) throw new Error('Local release tag points to a different source revision.');
+  const remoteResult = quick('git', ['ls-remote', 'origin', 'refs/tags/' + artifact.tag, 'refs/tags/' + artifact.tag + '^{}'], { allowFailure: true });
+  if (remoteResult.status !== 0) throw new Error('Remote tag lookup failed: ' + remoteResult.stderr.slice(-800));
+  const remoteLines = remoteResult.stdout.trim().split(/\r?\n/).filter(Boolean);
+  const remoteCommit = remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag + '^{}'))?.split(/\s+/)[0]
+    ?? remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag))?.split(/\s+/)[0];
+  if (remoteCommit && remoteCommit !== artifact.revision) throw new Error('Remote release tag points to a different source revision.');
+  if (!local) quick('git', ['tag', artifact.tag, artifact.revision]);
+  if (!remoteCommit) await command('git', ['push', 'origin', artifact.tag]);
+  await store.markRegistryVerified(artifact);
+  progress.print('  Published and tagged: ' + artifact.name + '@' + artifact.version);
+}
+
+async function runStage(title, operation) {
+  progress.start(title);
+  try {
+    const result = await operation();
+    progress.finish(result);
+    return result;
+  } catch (error) {
+    progress.finish(error);
+    throw error;
+  }
+}
+
+async function release() {
+  const branch = git('branch', '--show-current');
+  if (!dryRun && branch !== 'main') throw new Error('Real releases must run from main.');
   if (git('status', '--porcelain')) throw new Error('Commit all changes before release.');
   const revision = git('rev-parse', 'HEAD');
-  const remote = git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0];
-  if (remote !== revision) throw new Error('Push main to origin before release.');
-  const account = quick('npm', ['whoami', '--registry', registry]).stdout.trim();
-  if (account !== 'inoceanlee') throw new Error('npm must be logged in as inoceanlee.');
-  const manifest = JSON.parse(git('show', 'HEAD:packages/cli/package.json'));
-  if (manifest.name !== name) throw new Error('Unexpected npm package name.');
+  const manifest = JSON.parse(readFileSync(path.join(root, 'packages', 'cli', 'package.json'), 'utf8'));
+  if (manifest.name !== RELEASE_CONFIG.packageName) throw new Error('Unexpected npm package name.');
+  const version = manifest.version;
+  const tag = RELEASE_CONFIG.tagPrefix + version;
+  const buildFingerprint = hashBuildInputs(revision);
 
-  const checkpoint = receiptFile(revision);
-  if (existsSync(checkpoint)) {
-    if (dryRun) throw new Error('A published release is awaiting registry verification. Finish it before another dry run.');
-    const saved = JSON.parse(readFileSync(checkpoint, 'utf8'));
-    if (saved.revision !== revision || saved.name !== name) throw new Error('Release checkpoint does not match the current source.');
-    progress.print('  Resuming release verification: ' + name + '@' + saved.version);
-    await finishRelease(saved);
+  const pending = await store.load(version);
+  if (pending?.publishAttempted) {
+    if (dryRun) throw new Error('A publish attempt has unknown status. Dry-run will not query or modify the registry.');
+    progress.print('  Verifying prior publish attempt: ' + pending.name + '@' + pending.version);
+    await verifyAndTag(pending);
     return;
   }
-  if (git('tag', '--points-at', 'HEAD', '--list', 'brc-v*')) throw new Error('Current source commit already released.');
-  const version = manifest.version;
-  assertReleaseVersion(version, publishedVersion());
-  const tag = 'brc-v' + version;
-  if (git('tag', '--list', tag)) throw new Error('Release tag already exists: ' + tag);
-  progress.print('Release: ' + name + '@' + version);
-  const traefik = process.env.BRC_TRAEFIK_TEST_BINARY || path.resolve(root, '../traefik/traefik.exe');
-  if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);
-  await withReleaseWorkspace(async (output) => {
-    await progress.step(1, 5, '构建并打包（gzip 9 级）', async () => {
-      await command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--with-next-patch']);
-    });
-    const archives = readdirSync(output).filter((file) => file.endsWith('.tgz'));
-    if (archives.length !== 1 || archives[0] !== 'inoceanlee-brc-' + version + '.tgz') throw new Error('Unexpected package archives.');
-    const archive = path.join(output, archives[0]);
-    const v = version.split('.').map(Number);
-    const nextVersion = [v[0], v[1], v[2] + 1].join('.');
-    const nextArchive = path.join(output, 'next-patch', 'inoceanlee-brc-' + nextVersion + '.tgz');
-    if (!existsSync(nextArchive)) throw new Error('Missing upgrade test archive.');
-    const env = { ...process.env, BRC_TRAEFIK_TEST_BINARY: traefik, BRC_PACKAGE_TARBALL: archive, BRC_PACKAGE_UPDATED_TARBALL: nextArchive };
-    await progress.step(2, 5, '完整单测与隔离安装', async () => {
-      await command('pnpm', ['test:unit'], { env });
-      await command('pnpm', ['test:package'], { env });
-    });
-    await progress.step(3, 5, 'Traefik、OAuth 与 MCP E2E', async () => {
-      await command('pnpm', ['test:e2e'], { env });
-    });
-    await progress.step(4, 5, '检查 npm 发行包', async () => {
-      await command('npm', ['publish', archive, '--dry-run', '--access', 'public', '--registry', registry]);
-    });
-    if (dryRun) {
-      progress.print('Dry run passed. No package published.');
-      return;
+
+  let artifact = await store.find({ revision, name: manifest.name, version, buildFingerprint });
+  if (!artifact) {
+    if (git('tag', '--points-at', 'HEAD', '--list', 'brc-v*')) throw new Error('Current source commit already released.');
+    if (!dryRun) {
+      if (git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/)[0] !== revision) throw new Error('Push main to origin before release.');
+      const account = quick('npm', ['whoami', '--registry', RELEASE_CONFIG.registry]).stdout.trim();
+      if (account !== 'inoceanlee') throw new Error('npm must be logged in as inoceanlee.');
+      assertReleaseVersion(version, publishedVersion());
     }
-    await progress.step(5, 5, '发布 npm（终端身份认证）', async () => {
-      await command('npm', ['publish', archive, '--access', 'public', '--registry', registry], { interactive: true });
+    const traefik = process.env.BRC_TRAEFIK_TEST_BINARY || path.resolve(root, '../traefik/traefik.exe');
+    if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);
+    progress.print('Release: ' + manifest.name + '@' + version);
+    artifact = await withReleaseWorkspace(async (output) => {
+      await runStage('Build package', () => command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--with-next-patch']));
+      const archives = readdirSync(output).filter((file) => file.endsWith('.tgz'));
+      const filename = 'inoceanlee-brc-' + version + '.tgz';
+      if (archives.length !== 1 || archives[0] !== filename) throw new Error('Unexpected package archives.');
+      const archive = path.join(output, filename);
+      const nextArchive = path.join(output, 'next-patch', filename.replace(version, nextPatch(version)));
+      if (!existsSync(nextArchive)) throw new Error('Missing upgrade test archive.');
+      const env = { ...process.env, BRC_TRAEFIK_TEST_BINARY: traefik, BRC_PACKAGE_TARBALL: archive, BRC_PACKAGE_UPDATED_TARBALL: nextArchive };
+      await runStage('Unit tests', () => command('pnpm', ['test:unit'], { env }));
+      if (dryRun) {
+        progress.print('  Offline dry-run: registry, login, publish and tags were not accessed.');
+        return null;
+      }
+      await runStage('Package install and upgrade tests', () => command('pnpm', ['test:package'], { env }));
+      await runStage('Traefik OAuth and MCP E2E', () => command('pnpm', ['test:e2e'], { env }));
+      await runStage('Inspect npm package', () => command('npm', ['publish', archive, '--dry-run', '--access', 'public', '--registry', RELEASE_CONFIG.registry]));
+      return store.save({
+        archive, revision, name: manifest.name, version, tag, buildFingerprint,
+        validations: { unit: true, package: true, e2e: true, dryRun: true },
+      });
     });
-    const receipt = { revision, version, tag, name };
-    saveReceipt(checkpoint, receipt);
-    await finishRelease(receipt);
-  });
+  }
+  if (dryRun) {
+    progress.print('Dry run passed. No package published or tag created.');
+    return;
+  }
+  progress.print('Validated archive reused: ' + artifact.archivePath);
+  artifact.tag = tag;
+  artifact = await store.markAttempted(artifact);
+  artifact.tag = tag;
+  await command('npm', ['publish', artifact.archivePath, '--access', 'public', '--registry', RELEASE_CONFIG.registry], { interactive: true });
+  await verifyAndTag(artifact);
 }
-main().catch((error) => {
+
+function nextPatch(version) {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) throw new Error('Invalid release version.');
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
+lock.withExclusive(() => release(), { revision: 'pending' }).catch((error) => {
   console.error('\nRelease stopped: ' + (error instanceof Error ? error.message : String(error)));
   process.exitCode = 1;
 });
