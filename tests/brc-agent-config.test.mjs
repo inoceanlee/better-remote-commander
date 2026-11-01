@@ -81,7 +81,10 @@ test('watch reloads an external configuration change', async () => {
   assert.equal(await configManager.getValue('defaultShell'), 'external-shell');
 });
 
-test.after(async () => { await rm(root, { recursive: true, force: true }); });
+test.after(async () => {
+  configManager.watcher?.close();
+  await rm(root, { recursive: true, force: true });
+});
 
 test('corrupt JSON and read or lock errors do not initialize writable defaults', async () => {
   const moduleUrl = pathToFileURL(path.resolve('packages/agent/dist/core/config-manager.js')).href;
