@@ -336,7 +336,22 @@ test('missing deployment templates leave the installed version and both configur
   await mkdir(isolatedPackage, { recursive: true });
   await cp(path.join(cliRoot, 'dist'), path.join(isolatedPackage, 'dist'), { recursive: true });
   await copyFile(path.join(cliRoot, 'package.json'), path.join(isolatedPackage, 'package.json'));
-  await symlink(path.join(cliRoot, 'node_modules'), path.join(isolatedPackage, 'node_modules'), 'junction');
+  const modules = path.join(isolatedPackage, 'node_modules');
+  await mkdir(modules);
+  let unzipperRoot = path.dirname(require.resolve('unzipper'));
+  while (true) {
+    try {
+      const packageJson = JSON.parse(await readFile(path.join(unzipperRoot, 'package.json'), 'utf8'));
+      if (packageJson.name === 'unzipper') break;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const parent = path.dirname(unzipperRoot);
+    if (parent === unzipperRoot) throw new Error('Cannot locate the installed unzipper package.');
+    unzipperRoot = parent;
+  }
+  await symlink(unzipperRoot, path.join(modules, 'unzipper'), 'junction');
+  await symlink(path.resolve(cliRoot, '../shared'), path.join(modules, 'brc-shared'), 'junction');
   const { TraefikManager: IsolatedManager } = await import(pathToFileURL(path.join(isolatedPackage, 'dist', 'traefik', 'manager.js')).href);
   const manager = new IsolatedManager(brcPaths, settingsFor(), makeLifecycle(), {
     fetch: release.fetch,
