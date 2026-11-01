@@ -2,7 +2,7 @@ import type { TraefikProgressEvent } from './traefik/manager.js';
 
 interface ProgressOutput {
   readonly isTTY?: boolean;
-  write(text: string): unknown;
+  write(text: string, callback?: (error?: Error | null) => void): unknown;
   on?(event: 'error', listener: (error: Error) => void): unknown;
   once?(event: 'drain', listener: () => void): unknown;
 }
@@ -14,11 +14,16 @@ export class TraefikProgress {
   private frame = 0;
   private failed = false;
   private blocked = false;
+  private pending?: string;
+  private inFlight = 0;
+  private settled?: () => void;
 
   constructor(private readonly output: ProgressOutput = process.stderr) {
     this.output.on?.('error', () => {
       this.failed = true;
       this.blocked = false;
+      this.pending = undefined;
+      this.settled?.();
     });
   }
 
@@ -63,6 +68,24 @@ export class TraefikProgress {
     this.percent = undefined;
   }
 
+  async stopAndWait(): Promise<void> {
+    this.stop();
+    if (this.failed || (!this.blocked && this.pending === undefined && this.inFlight === 0)) return;
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(finish, 250);
+      const self = this;
+      function finish() {
+        clearTimeout(timeout);
+        self.settled = undefined;
+        resolve();
+      }
+      this.settled = () => {
+        if (this.failed || (!this.blocked && this.pending === undefined && this.inFlight === 0)) finish();
+      };
+      this.settled();
+    });
+  }
+
   private render(): void {
     if (!this.current) return;
     const spinner = ['|', '/', '-', '\\'][this.frame++ % 4];
@@ -71,22 +94,47 @@ export class TraefikProgress {
   }
 
   private write(text: string): void {
-    if (this.failed || this.blocked) return;
+    if (this.failed) return;
+    if (this.blocked) {
+      this.pending = text;
+      return;
+    }
     try {
-      if (this.output.write(text) === false && this.output.once) {
+      this.inFlight++;
+      const accepted = this.output.write(text, (error) => {
+        this.inFlight--;
+        if (error) {
+          this.failed = true;
+          this.pending = undefined;
+          this.blocked = false;
+        }
+        this.settled?.();
+      });
+      if (accepted === false && this.output.once) {
         this.blocked = true;
-        this.output.once('drain', () => { this.blocked = false; });
+        this.output.once('drain', () => {
+          this.blocked = false;
+          const pending = this.pending;
+          this.pending = undefined;
+          if (pending !== undefined) this.write(pending);
+          this.settled?.();
+        });
       }
     } catch {
       this.failed = true;
+      this.inFlight = 0;
+      this.pending = undefined;
+      this.blocked = false;
+      this.settled?.();
     }
   }
 }
 
 export function installProgressInterruptHandler(progress: TraefikProgress): () => void {
-  const interrupt = () => {
-    progress.stop();
+  const interrupt = async () => {
+    await progress.stopAndWait();
     process.removeListener('SIGINT', interrupt);
+    if (process.platform === 'win32') process.exit(0xC000013A);
     process.kill(process.pid, 'SIGINT');
   };
   process.once('SIGINT', interrupt);

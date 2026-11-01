@@ -378,7 +378,7 @@ test('byte updates do not redraw until the animation timer fires', async () => {
 test('SIGINT clears a live progress line and preserves interrupt exit semantics', { skip: process.platform === 'win32', timeout: 5000 }, async () => {
   const progressUrl = JSON.stringify(new URL('../packages/cli/dist/progress.js', import.meta.url).href);
   const source = `import { TraefikProgress, installProgressInterruptHandler } from ${progressUrl};
-    const output = { isTTY: true, write: (text) => process.stdout.write(text) };
+    const output = { isTTY: true, write: (text, callback) => process.stdout.write(text, callback) };
     const progress = new TraefikProgress(output);
     installProgressInterruptHandler(progress);
     progress.report({ operation: 'setup', stage: 'download', status: 'started' });
@@ -390,7 +390,7 @@ test('SIGINT clears a live progress line and preserves interrupt exit semantics'
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const ended = new Promise((resolve, reject) => {
     child.on('error', reject);
-    child.on('exit', (code, signal) => resolve({ code, signal }));
+    child.on('close', (code, signal) => resolve({ code, signal }));
   });
   child.stdout.on('data', (chunk) => {
     stdout += chunk;
@@ -412,4 +412,63 @@ test('asynchronous progress stream errors do not change command outcome', async 
     setTimeout(() => { progress.stop(); process.exitCode = 7; }, 30);`;
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
   assert.equal(result.status, 7, result.stderr);
+});
+
+test('backpressure flushes the final clear after drain', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  class Output extends EventEmitter {
+    isTTY = true;
+    text = '';
+    write(text, callback) {
+      this.text += text;
+      callback?.();
+      return this.text.length > text.length;
+    }
+  }
+  const output = new Output();
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  const stopping = progress.stopAndWait();
+  output.emit('drain');
+  await stopping;
+  assert.ok(output.text.endsWith('\r\x1b[2K'));
+});
+
+test('interrupt cleanup is bounded when a blocked stream never drains', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  class Output extends EventEmitter {
+    isTTY = true;
+    write(_text, callback) { callback?.(); return false; }
+  }
+  const progress = new TraefikProgress(new Output());
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  await Promise.race([
+    progress.stopAndWait(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('interrupt cleanup timed out')), 1500)),
+  ]);
+});
+
+test('backpressure retains the latest progress frame until drain', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  class Output extends EventEmitter {
+    isTTY = true;
+    text = '';
+    write(text, callback) {
+      const first = this.text.length === 0;
+      this.text += text;
+      callback?.();
+      return !first;
+    }
+  }
+  const output = new Output();
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 50, totalBytes: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  output.emit('drain');
+  assert.match(output.text, /50%/);
+  progress.stop();
 });
