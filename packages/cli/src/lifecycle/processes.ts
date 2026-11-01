@@ -235,8 +235,9 @@ export class ProcessManager {
       if (!child.pid) throw new Error(`${spec.name} process did not receive a PID.`);
       child.unref();
       this.starting.set(spec.name, child.pid);
+      const deadline = Date.now() + (spec.startupTimeoutMs ?? this.startupTimeoutMs);
 
-      const ready = await this.waitForReady(child, spec, readyFile, id, () => exit);
+      const ready = await this.waitForReady(child, spec, readyFile, id, () => exit, deadline);
       const identity = await this.inspect(child.pid);
       if (!identity || !this.isCandidateIdentity(identity, spec, id)) {
         throw new Error(`${spec.name} process identity could not be verified after startup.`);
@@ -255,7 +256,7 @@ export class ProcessManager {
         controlToken: token,
       };
       await this.writeRecord(record);
-      await this.waitForHealthy(record, spec);
+      await this.waitForHealthy(record, spec, child, () => exit, deadline);
     } catch (error) {
       let cleanupError: unknown;
       try {
@@ -377,8 +378,8 @@ export class ProcessManager {
     readyFile: string,
     id: string,
     getExit: () => { code: number | null; signal: NodeJS.Signals | null } | null,
+    deadline: number,
   ): Promise<ReadyInfo> {
-    const deadline = Date.now() + (spec.startupTimeoutMs ?? this.startupTimeoutMs);
     while (Date.now() < deadline) {
       const exit = getExit();
       if (exit) throw new Error(`${spec.name} exited before readiness (code ${exit.code ?? 'null'}, signal ${exit.signal ?? 'none'}).`);
@@ -390,53 +391,64 @@ export class ProcessManager {
       } catch (error) {
         if (errorCode(error) !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
       }
-      await sleep(this.pollIntervalMs);
+      await sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     throw new Error(`${spec.name} did not publish a ready control endpoint before timeout.`);
   }
 
-  private async waitForHealthy(record: ManagedProcessRecord, spec: ManagedServiceSpec): Promise<void> {
-    const deadline = Date.now() + (spec.startupTimeoutMs ?? this.startupTimeoutMs);
+  private async waitForHealthy(
+    record: ManagedProcessRecord,
+    spec: ManagedServiceSpec,
+    child: ChildProcess,
+    getExit: () => { code: number | null; signal: NodeJS.Signals | null } | null,
+    deadline: number,
+  ): Promise<void> {
     let detail = 'Health endpoint did not report ready.';
     while (Date.now() < deadline) {
-      const identity = await this.inspect(record.pid);
-      if (!identity) throw new Error(`${spec.name} exited during startup.`);
-      if (!sameIdentity(record, identity, spec)) throw new Error(`${spec.name} process identity changed during startup.`);
+      if (getExit() || child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`${spec.name} exited during startup.`);
+      }
       try {
-        const health = await this.readHealth(record);
+        const health = await this.readHealth(record, deadline);
+        if (getExit() || child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(`${spec.name} exited during startup.`);
+        }
         detail = health.detail;
         if (health.ok && health.state === 'running') return;
         if (spec.name === 'agent' && health.state === 'pairing') return;
       } catch (error) {
+        if (getExit() || child.exitCode !== null || child.signalCode !== null) throw error;
         detail = processErrorMessage(error);
       }
-      await sleep(this.pollIntervalMs);
+      await sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     throw new Error(`${spec.name} did not become healthy: ${detail}`);
   }
 
-  private async readHealth(record: ManagedProcessRecord): Promise<HealthInfo> {
+  private async readHealth(record: ManagedProcessRecord, deadline = Infinity): Promise<HealthInfo> {
     if (record.controlPort < 1) throw new Error('Missing managed control port.');
     for (let attempt = 0; attempt <= HEALTH_RETRY_COUNT; attempt++) {
       try {
-        return await this.requestHealth(record);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Health request deadline expired.');
+        return await this.requestHealth(record, Math.min(CONTROL_REQUEST_TIMEOUT_MS, remaining));
       } catch (error) {
-        if (attempt === HEALTH_RETRY_COUNT) throw error;
-        await sleep(this.pollIntervalMs);
+        if (attempt === HEALTH_RETRY_COUNT || Date.now() >= deadline) throw error;
+        await sleep(Math.min(this.pollIntervalMs, Math.max(0, deadline - Date.now())));
       }
     }
     throw new Error('Health request exhausted all retries.');
   }
 
-  private async requestHealth(record: ManagedProcessRecord): Promise<HealthInfo> {
+  private async requestHealth(record: ManagedProcessRecord, timeoutMs: number): Promise<HealthInfo> {
     const response = await fetch(`http://127.0.0.1:${record.controlPort}/health`, {
       headers: { authorization: `Bearer ${record.controlToken}` },
-      signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const health = await response.json() as Partial<HealthInfo>;
     return {
       ok: response.ok && health.ok === true,
-      state: health.state === 'pairing' ? 'pairing' : health.state === 'running' ? 'running' : 'degraded',
+      state: response.ok && health.state === 'pairing' ? 'pairing' : response.ok && health.state === 'running' ? 'running' : 'degraded',
       detail: typeof health.detail === 'string' ? health.detail : `Control endpoint returned HTTP ${response.status}.`,
     };
   }

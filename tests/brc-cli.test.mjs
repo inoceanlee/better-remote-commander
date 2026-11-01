@@ -61,6 +61,19 @@ test('help explains package-only removal and full uninstall', () => {
   assert.match(result.stdout, /pnpm remove -g @inoceanlee\/brc/);
   assert.match(result.stdout, /brc uninstall/);
 });
+
+test('help and invalid arguments do not initialize configuration', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-light-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'config'), { recursive: true });
+  await writeFile(path.join(root, 'config', 'brc.yaml.last-good'), 'invalid: [');
+  const help = runCliProcess(['help'], root);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /BRC unified CLI/);
+  const invalid = runCliProcess(['start', 'extra'], root);
+  assert.equal(invalid.status, 2, invalid.stderr);
+  assert.match(invalid.stderr, /does not accept extra arguments/);
+});
 test('non-interactive uninstall requires --yes and preserves private data', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-uninstall-'));
   t.after(() => rm(root, { recursive: true, force: true }));

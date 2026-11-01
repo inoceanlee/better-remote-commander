@@ -7,7 +7,7 @@ import { requestAdministrator } from './commands/setup/input.js';
 import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
 import { SettingsManager } from './config/manager.js';
 import { readSettings } from './config/reader.js';
-import type { BrcSettings } from './config/settings.js';
+import { isBrcSettingKey, type BrcSettings } from './config/settings.js';
 import { LifecycleLock } from './lifecycle/lock.js';
 import { ProcessManager } from './lifecycle/processes.js';
 import { createDefaultServices, ServiceManager } from './lifecycle/services.js';
@@ -189,6 +189,43 @@ function traefikSettingsChanged(previous: Readonly<BrcSettings>, next: Readonly<
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
+  const args = process.argv.slice(2);
+  const [command, ...commandArgs] = args;
+  const configCommand = commandArgs[0] ?? '';
+  const invalidConfig = command === 'config' && (
+    (['show', 'apply', 'path'].includes(configCommand) && commandArgs.length !== 1)
+    || (configCommand === 'get' && (commandArgs.length !== 2 || !isBrcSettingKey(commandArgs[1] ?? '')))
+    || (configCommand === 'set' && (commandArgs.length !== 3 || !isBrcSettingKey(commandArgs[1] ?? '')))
+    || !['show', 'apply', 'path', 'get', 'set'].includes(configCommand)
+  );
+  const simpleCommands = ['setup', 'start', 'stop', 'restart', 'status', 'clean'];
+  const lightweight = command === 'help' || command === '-h' || command === '--help'
+    || invalidConfig
+    || (command !== undefined && !['setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'clean', 'uninstall'].includes(command))
+    || (simpleCommands.includes(command ?? '') && commandArgs.length !== 0)
+    || (command === 'logs' && (commandArgs.length > 1 || (commandArgs[0] && !isLogComponent(commandArgs[0]))))
+    || (command === 'update' && (commandArgs.length !== 1 || commandArgs[0] !== 'traefik'))
+    || (command === 'uninstall' && (commandArgs.length > 1 || (commandArgs.length === 1 && commandArgs[0] !== '--yes')));
+  const clean = async (cleanPaths: BrcPaths) => {
+    const { settings: cleanupSettings } = await readSettings(cleanPaths, process.env);
+    const report = await cleanRuntime(cleanPaths, { settings: cleanupSettings });
+    if (report.removed || report.failures.length || report.preserved.length) {
+      console.log(`BRC cleanup: removed ${report.removed} items, freed ${report.bytesRemoved} bytes.`);
+      for (const failure of report.failures) console.error(`BRC cleanup failed: ${failure.path}: ${failure.reason}`);
+      for (const preserved of report.preserved) console.error(`BRC cleanup preserved ${preserved.path}: ${preserved.reason}`);
+    }
+  };
+  if (lightweight) {
+    process.exitCode = await runCli(args, {
+      paths,
+      commands: { setup: unavailable, start: unavailable, stop: unavailable, restart: unavailable, status: unavailable,
+        logs: unavailable, config: (configArgs) => runConfigCommand(configArgs, { manager: undefined as unknown as SettingsManager, paths, write: (message) => console.log(message) }), updateTraefik: unavailable, uninstall: unavailable },
+      clean,
+      write: (message) => console.log(message),
+      writeError: (message) => console.error(message),
+    });
+    return;
+  }
   const rootWasEmpty = !existsSync(paths.root) || readdirSync(paths.root).every((entry) =>
     entry === 'runtime' && readdirSync(paths.runtime).length === 0,
   );
@@ -251,7 +288,7 @@ async function main(): Promise<void> {
         relayDatabase.assertExists();
         await serviceManager.withLock(async (operations) => {
           const statuses = await serviceManager.status();
-          const hasRunning = statuses.some((status) => status.state === 'running');
+          const hasRunning = statuses.some((status) => status.state === 'running' || status.state === 'pairing');
           const hasStopped = statuses.some((status) => status.state === 'stopped');
           if (hasRunning && hasStopped) {
             throw new Error('Cannot start a partially running service set; run brc restart to apply configuration safely.');
@@ -306,15 +343,7 @@ async function main(): Promise<void> {
       },
       uninstall: maintenanceCommands.uninstall,
     },
-    clean: async (cleanPaths) => {
-      const { settings: cleanupSettings } = await readSettings(cleanPaths, process.env);
-      const report = await cleanRuntime(cleanPaths, { settings: cleanupSettings });
-      if (report.removed || report.failures.length || report.preserved.length) {
-        console.log(`BRC cleanup: removed ${report.removed} items, freed ${report.bytesRemoved} bytes.`);
-        for (const failure of report.failures) console.error(`BRC cleanup failed: ${failure.path}: ${failure.reason}`);
-        for (const preserved of report.preserved) console.error(`BRC cleanup preserved ${preserved.path}: ${preserved.reason}`);
-      }
-    },
+    clean,
     write: (message) => console.log(message),
     writeError: (message) => console.error(message),
   };

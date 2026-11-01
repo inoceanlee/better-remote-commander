@@ -33,6 +33,7 @@ if (servicePort) {
     process.exit(23);
   }
 }
+const healthyAt = Date.now() + Number(process.env.BRC_TEST_HEALTH_DELAY ?? 0);
 let healthHits = 0;
 const control = createServer((req, res) => {
   if (req.socket.remoteAddress !== '127.0.0.1' || req.headers.authorization !== 'Bearer ' + token) {
@@ -42,6 +43,11 @@ const control = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     healthHits++;
     if (mode === 'flaky' && healthHits === 2) { req.socket.destroy(); return; }
+    if (Date.now() < healthyAt) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, state: 'starting', detail: 'starting' }));
+      return;
+    }
     if (mode === 'pairing') {
       res.writeHead(202, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: false, state: 'pairing', detail: 'Awaiting device approval.' }));
@@ -241,6 +247,17 @@ test('unpaired agent starts without treating human approval as a process failure
   assert.equal((await harness.manager.status(harness.spec)).state, 'pairing');
 });
 
+test('startup health polling does not repeat process identity inspection', async (t) => {
+  let inspections = 0;
+  const harness = await makeHarness(t, {
+    env: { BRC_TEST_HEALTH_DELAY: '1200' },
+    startupTimeoutMs: 5000,
+    processOptions: { inspectProcess: async (pid) => { inspections++; return inspectProcess(pid); } },
+  });
+  await harness.manager.start(harness.spec);
+  assert.equal(inspections, 1);
+});
+
 test('runtime timeout updates apply to the next managed process start', async (t) => {
   const harness = await makeHarness(t, {
     startupTimeoutMs: 50,
@@ -362,6 +379,25 @@ test('starts in order, makes start and stop idempotent, and stops in reverse ord
   await manager.stop();
 
   assert.deepEqual(processes.calls, ['start:relay', 'start:agent', 'stop:agent', 'stop:relay']);
+});
+
+test('start trusts successful readiness and status uses the batch API', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brc-services-batch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const processes = new FakeProcessManager();
+  const checked = [];
+  const status = processes.status.bind(processes);
+  processes.status = async (spec) => { checked.push(spec.name); return status(spec); };
+  let batches = 0;
+  processes.statusMany = async (specs) => {
+    batches++;
+    return Promise.all(specs.map(status));
+  };
+  const manager = new ServiceManager(paths(root), workspaceServices(root), processes);
+  await manager.start();
+  assert.deepEqual(checked, ['relay', 'agent']);
+  assert.equal((await manager.status()).length, 2);
+  assert.equal(batches, 1);
 });
 
 test('service operations refresh configuration after acquiring the shared lock', async (t) => {

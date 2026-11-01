@@ -16,6 +16,7 @@ export interface ProcessController {
   start(spec: ManagedServiceSpec): Promise<void>;
   stop(spec: ManagedServiceSpec): Promise<void>;
   status(spec: ManagedServiceSpec): Promise<ServiceStatus>;
+  statusMany?(specs: readonly ManagedServiceSpec[]): Promise<ServiceStatus[]>;
 }
 function childEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...parent };
@@ -137,7 +138,8 @@ export class ServiceManager {
   }
 
   status(): Promise<ServiceStatus[]> {
-    return Promise.all(this.services.map((service) => this.processes.status(service)));
+    return this.processes.statusMany?.(this.services)
+      ?? Promise.all(this.services.map((service) => this.processes.status(service)));
   }
   private validateServices(services: ManagedServiceSpec[]): void {
     const names = new Set<ManagedServiceSpec['name']>();
@@ -158,10 +160,6 @@ export class ServiceManager {
         }
         await this.processes.start(service);
         started.push(service);
-        const status = await this.processes.status(service);
-        if (status.state !== 'running' && !(service.name === 'agent' && status.state === 'pairing')) {
-          throw new Error(`${service.name} did not become healthy: ${status.detail}`);
-        }
       }
     } catch (error) {
       const rollbackErrors: unknown[] = [];

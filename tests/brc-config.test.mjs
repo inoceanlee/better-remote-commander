@@ -66,6 +66,17 @@ test('settings snapshots are independent of manager state and each other', async
   assert.equal(manager.snapshot().proxy.rate.average, 10);
 });
 
+test('loading valid settings with last-good does not take the lifecycle lock', async (t) => {
+  const { paths, env, manager } = await createFixture(t);
+  t.after(() => rm(paths.root, { recursive: true, force: true }));
+  await manager.ensureConfigFile();
+  let locks = 0;
+  const lock = { runExclusive: async (operation) => { locks++; return operation(); } };
+  const loaded = await SettingsManager.load(paths, env, { lock, apply: async () => {} });
+  assert.equal(loaded.get('proxy.rate.average').value, 10);
+  assert.equal(locks, 0);
+});
+
 test('public URL setting persists, validates origins and marks restart required', async (t) => {
   const { manager, paths, env, lock, apply } = await createFixture(t);
   assert.deepEqual(manager.get('services.publicUrl'), { value: '', source: 'default' });

@@ -75,8 +75,8 @@ export class SettingsManager {
       throw new Error('SettingsManager requires a lifecycle lock and an apply operation.');
     }
     const runtimeEnv = { ...env };
-    const initial = await dependencies.lock.runExclusive(async () => {
-      let lastGood = await readLastGoodSettings(paths, runtimeEnv);
+    const read = async () => {
+      const lastGood = await readLastGoodSettings(paths, runtimeEnv);
       let loaded: LoadedSettings;
       try {
         loaded = await readSettings(paths, runtimeEnv);
@@ -84,12 +84,19 @@ export class SettingsManager {
         if (!(error instanceof InvalidConfigurationFileError)) throw error;
         loaded = lastGood ?? defaultSettings(runtimeEnv);
       }
-      if (!lastGood && loaded.rawContents !== null) {
-        await writeLastGoodText(paths, loaded.rawContents);
-        lastGood = loaded;
-      }
       return { loaded, lastGood };
-    });
+    };
+    let initial = await read();
+    if (!initial.lastGood && initial.loaded.rawContents !== null) {
+      initial = await dependencies.lock.runExclusive(async () => {
+        const current = await read();
+        if (!current.lastGood && current.loaded.rawContents !== null) {
+          await writeLastGoodText(paths, current.loaded.rawContents);
+          return { loaded: current.loaded, lastGood: current.loaded };
+        }
+        return current;
+      });
+    }
     return new SettingsManager(paths, runtimeEnv, dependencies, initial.loaded, initial.lastGood);
   }
 
