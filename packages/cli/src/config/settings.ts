@@ -22,6 +22,8 @@ export interface BrcSettings {
   runtime: {
     startupTimeoutMs: number;
     shutdownTimeoutMs: number;
+    lockWaitMs: number;
+    lockPollMs: number;
   };
 }
 
@@ -39,6 +41,8 @@ export interface BrcSettingValues {
   'logs.rotateMiB': number;
   'runtime.startupTimeoutMs': number;
   'runtime.shutdownTimeoutMs': number;
+  'runtime.lockWaitMs': number;
+  'runtime.lockPollMs': number;
 }
 
 export type BrcSettingKey = keyof BrcSettingValues;
@@ -59,6 +63,8 @@ export const BRC_SETTING_KEYS = [
   'logs.rotateMiB',
   'runtime.startupTimeoutMs',
   'runtime.shutdownTimeoutMs',
+  'runtime.lockWaitMs',
+  'runtime.lockPollMs',
 ] as const satisfies readonly BrcSettingKey[];
 
 export const SETTING_ENVIRONMENT_KEYS: Readonly<Record<BrcSettingKey, string>> = Object.freeze({
@@ -75,6 +81,8 @@ export const SETTING_ENVIRONMENT_KEYS: Readonly<Record<BrcSettingKey, string>> =
   'logs.rotateMiB': 'BRC_LOG_ROTATE_MIB',
   'runtime.startupTimeoutMs': 'BRC_RUNTIME_STARTUP_TIMEOUT_MS',
   'runtime.shutdownTimeoutMs': 'BRC_RUNTIME_SHUTDOWN_TIMEOUT_MS',
+  'runtime.lockWaitMs': 'BRC_RUNTIME_LOCK_WAIT_MS',
+  'runtime.lockPollMs': 'BRC_RUNTIME_LOCK_POLL_MS',
 });
 
 /** Internal health-check policy; independent from the user-controlled service startup deadline. */
@@ -92,7 +100,7 @@ export const DEFAULT_SETTINGS: Readonly<BrcSettings> = Object.freeze({
   }),
   services: Object.freeze({ relayPort: 3000, proxyPort: 13001, healthPort: 13002, publicUrl: '' }),
   logs: Object.freeze({ retentionDays: 7, maxTotalMiB: 50, rotateMiB: 4 }),
-  runtime: Object.freeze({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 3_000 }),
+  runtime: Object.freeze({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 3_000, lockWaitMs: 3_000, lockPollMs: 50 }),
 });
 
 export interface ResolvedSettings {

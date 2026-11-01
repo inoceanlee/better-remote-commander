@@ -250,11 +250,16 @@ async function main(): Promise<void> {
     },
   });
   const settings = settingsManager.snapshot();
+  lifecycleLock.updateWaitSettings({ waitMs: settings.runtime.lockWaitMs, pollMs: settings.runtime.lockPollMs });
   const processes = new ProcessManager(paths, {
     startupTimeoutMs: settings.runtime.startupTimeoutMs,
     shutdownTimeoutMs: settings.runtime.shutdownTimeoutMs,
   });
-  const loadSettings = async () => (await readSettings(paths, process.env)).settings;
+  const loadSettings = async () => {
+    const current = (await readSettings(paths, process.env)).settings;
+    lifecycleLock.updateWaitSettings({ waitMs: current.runtime.lockWaitMs, pollMs: current.runtime.lockPollMs });
+    return current;
+  };
   const refreshServices = async () => {
     const currentSettings = await loadSettings();
     processes.updateRuntimeSettings(currentSettings.runtime);

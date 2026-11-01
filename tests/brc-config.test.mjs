@@ -46,6 +46,8 @@ test('central settings defaults match the public configuration contract', () => 
     runtime: {
       startupTimeoutMs: 15_000,
       shutdownTimeoutMs: 3_000,
+      lockWaitMs: 3_000,
+      lockPollMs: 50,
     },
   });
 });
