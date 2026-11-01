@@ -57,6 +57,14 @@ export class LifecycleLock {
       try {
         if (await this.store.reclaimExpired(inspectProcess)) continue;
       } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+          if (await this.store.isMissing()) continue;
+          // A newly claimed directory may be publishing owner.json. Wait, never steal it.
+          if (Date.now() - started < this.waitMs) {
+            await sleep(this.pollMs);
+            continue;
+          }
+        }
         throw new Error('Lifecycle lock cannot be safely reclaimed.', { cause: error });
       }
       if (Date.now() - started >= this.waitMs) throw new Error('Another BRC lifecycle operation is in progress.');
