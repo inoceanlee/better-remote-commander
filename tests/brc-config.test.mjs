@@ -50,6 +50,22 @@ test('central settings defaults match the public configuration contract', () => 
   });
 });
 
+test('settings snapshots are independent of manager state and each other', async (t) => {
+  const { manager } = await createFixture(t);
+  const first = manager.snapshot();
+  const second = manager.snapshot();
+  first.proxy.rate.average = 999;
+  first.services.relayPort = 9999;
+  first.logs.retentionDays = 1;
+  first.runtime.startupTimeoutMs = 1;
+  assert.equal(manager.get('proxy.rate.average').value, 10);
+  assert.equal(manager.get('services.relayPort').value, 3000);
+  assert.equal(manager.get('logs.retentionDays').value, 7);
+  assert.equal(manager.get('runtime.startupTimeoutMs').value, 15_000);
+  assert.equal(second.proxy.rate.average, 10);
+  assert.equal(manager.snapshot().proxy.rate.average, 10);
+});
+
 test('public URL setting persists, validates origins and marks restart required', async (t) => {
   const { manager, paths, env, lock, apply } = await createFixture(t);
   assert.deepEqual(manager.get('services.publicUrl'), { value: '', source: 'default' });

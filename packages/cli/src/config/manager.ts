@@ -104,7 +104,7 @@ export class SettingsManager {
     return BRC_SETTING_KEYS.map((key) => ({ ...this.get(key), key }));
   }
   snapshot(): Readonly<BrcSettings> {
-    return this.loaded.settings;
+    return structuredClone(this.loaded.settings);
   }
 
   async ensureConfigFile(): Promise<void> {

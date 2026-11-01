@@ -118,27 +118,30 @@ test('legacy Relay database migration preserves identity and adds restricted use
   const deviceTokenHash = legacy.prepare('SELECT token_hash FROM devices WHERE device_id = ?').get('device-id').token_hash;
   legacy.close();
   const store = SqliteStore.open(file);
+  const db = new DatabaseSync(file);
+  db.exec('PRAGMA foreign_keys = ON');
   try {
     const user = store.getUserByName('admin');
     assert.equal(user.id, 'admin-id');
     assert.equal(user.password_hash, passwordHash);
     assert.equal(store.getDevice('device-id').user_id, 'admin-id');
-    assert.equal(store.db.prepare('SELECT token_hash FROM devices WHERE device_id = ?').get('device-id').token_hash, deviceTokenHash);
+    assert.equal(db.prepare('SELECT token_hash FROM devices WHERE device_id = ?').get('device-id').token_hash, deviceTokenHash);
     assert.equal(store.getToken('legacy-access', 'access').user_id, 'admin-id');
-    assert.equal(store.db.prepare('SELECT token_hash FROM tokens WHERE kind = ?').get('access').token_hash, accessTokenHash);
+    assert.equal(db.prepare('SELECT token_hash FROM tokens WHERE kind = ?').get('access').token_hash, accessTokenHash);
     assert.equal(store.peekAuthCode('auth-code').user_id, 'admin-id');
     assert.equal(store.getDeviceCode('pending-code').user_id, null);
-    assert.equal(store.db.prepare('SELECT user_id FROM api_keys').get().user_id, 'admin-id');
-    assert.equal(store.db.prepare('SELECT user_id FROM audit').get().user_id, 'historical-user');
+    assert.equal(db.prepare('SELECT user_id FROM api_keys').get().user_id, 'admin-id');
+    assert.equal(db.prepare('SELECT user_id FROM audit').get().user_id, 'historical-user');
     for (const table of ['devices', 'tokens', 'auth_codes', 'device_codes', 'api_keys']) {
-      const foreignKeys = store.db.prepare(`PRAGMA foreign_key_list(${table})`).all();
+      const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${table})`).all();
       assert.ok(foreignKeys.some((foreignKey) => foreignKey.table === 'users' && foreignKey.from === 'user_id' && foreignKey.to === 'id' && foreignKey.on_delete === 'RESTRICT'), `${table} must restrict user deletion`);
     }
-    assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal(store.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-    assert.throws(() => store.db.prepare('DELETE FROM users WHERE id = ?').run('admin-id'), /FOREIGN KEY constraint failed/);
-    assert.doesNotThrow(() => store.db.prepare('INSERT INTO device_codes VALUES (?,?,?,?,?,?,?,?,?)').run('new-pending', 'EEEE-FFFF', 'Agent', null, 0, 0, null, Date.now() + 60_000, 1));
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+    assert.throws(() => db.prepare('DELETE FROM users WHERE id = ?').run('admin-id'), /FOREIGN KEY constraint failed/);
+    assert.doesNotThrow(() => db.prepare('INSERT INTO device_codes VALUES (?,?,?,?,?,?,?,?,?)').run('new-pending', 'EEEE-FFFF', 'Agent', null, 0, 0, null, Date.now() + 60_000, 1));
   } finally {
+    db.close();
     store.close();
     rmSync(directory, { recursive: true, force: true });
   }
@@ -224,10 +227,14 @@ test('Relay rejects a device WebSocket whose stored owner no longer exists', asy
   const relay = buildRelay(config(file), () => {});
   try {
     const token = 'orphan-device-token';
-    relay.store.db.exec('PRAGMA foreign_keys = OFF');
-    relay.store.db.prepare('INSERT INTO devices (device_id,user_id,name,token_hash,platform,created_at,last_seen,paused) VALUES (?,?,?,?,?,?,?,?)')
-      .run('orphan-device', 'missing-user', 'Orphan', sha256(token), 'win32', Date.now(), null, 0);
-    relay.store.db.exec('PRAGMA foreign_keys = ON');
+    const db = new DatabaseSync(file);
+    try {
+      db.exec('PRAGMA foreign_keys = OFF');
+      db.prepare('INSERT INTO devices (device_id,user_id,name,token_hash,platform,created_at,last_seen,paused) VALUES (?,?,?,?,?,?,?,?)')
+        .run('orphan-device', 'missing-user', 'Orphan', sha256(token), 'win32', Date.now(), null, 0);
+    } finally {
+      db.close();
+    }
     const port = await listen(relay);
     assert.equal(await websocketStatus(port, token), 401);
   } finally {

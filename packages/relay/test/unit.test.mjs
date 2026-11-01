@@ -2,6 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { SqliteStore, sha256, verifyPassword, hashPassword } from '../dist/store/sqlite.js';
 import { RelayOAuthProvider } from '../dist/auth/provider.js';
 import { LoginLimiter } from '../dist/auth/rate-limit.js';
@@ -69,21 +73,32 @@ test('store preserves administrator id and password hash when password is unchan
 });
 
 test('OAuth rejects authorization codes, access tokens, refresh tokens, and API keys with missing owners', async () => {
-  const s = SqliteStore.open(':memory:');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'brc-oauth-owners-'));
+  const file = path.join(directory, 'relay.sqlite');
+  SqliteStore.initialize(file);
+  const s = SqliteStore.open(file);
   try {
-    s.upsertUser('admin', 'pw');
-    s.db.exec('PRAGMA foreign_keys = OFF');
+    const user = s.upsertUser('admin', 'pw');
+    s.createApiKey(user.id, 'valid key');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA foreign_keys = OFF');
     const now = Date.now();
     const code = (value) => ({
       code: value, client_id: 'client', user_id: 'missing-user', code_challenge: 'challenge',
       redirect_uri: 'https://client.invalid/callback', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000,
     });
-    s.insertAuthCode(code('stale-challenge'));
-    s.insertAuthCode(code('stale-exchange'));
-    s.insertToken({ token_hash: sha256('stale-access'), kind: 'access', client_id: 'client', user_id: 'missing-user', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000, created_at: now, revoked: 0 });
-    s.insertToken({ token_hash: sha256('stale-refresh'), kind: 'refresh', client_id: 'client', user_id: 'missing-user', scopes: 'mcp:tools', resource: null, expires_at: now + 60_000, created_at: now, revoked: 0 });
-    const apiKey = s.createApiKey('missing-user', 'stale key');
-    s.db.exec('PRAGMA foreign_keys = ON');
+    const insertCode = db.prepare('INSERT INTO auth_codes VALUES (?,?,?,?,?,?,?,?)');
+    for (const value of ['stale-challenge', 'stale-exchange']) {
+      const row = code(value);
+      insertCode.run(row.code, row.client_id, row.user_id, row.code_challenge, row.redirect_uri, row.scopes, row.resource, row.expires_at);
+    }
+    const insertToken = db.prepare('INSERT INTO tokens VALUES (?,?,?,?,?,?,?,?,?)');
+    insertToken.run(sha256('stale-access'), 'access', 'client', 'missing-user', 'mcp:tools', null, now + 60_000, now, 0);
+    insertToken.run(sha256('stale-refresh'), 'refresh', 'client', 'missing-user', 'mcp:tools', null, now + 60_000, now, 0);
+    const apiKey = 'stale-api-key';
+    db.prepare('INSERT INTO api_keys (key_hash,user_id,name,prefix,created_at) VALUES (?,?,?,?,?)')
+      .run(sha256(apiKey), 'missing-user', 'stale key', 'stale', now);
+    db.close();
     const provider = new RelayOAuthProvider({
       store: s,
       currentUserId: () => null,
@@ -97,11 +112,12 @@ test('OAuth rejects authorization codes, access tokens, refresh tokens, and API 
       provider.exchangeAuthorizationCode(client, 'stale-exchange'),
       provider.exchangeRefreshToken(client, 'stale-refresh'),
       provider.verifyAccessToken('stale-access'),
-      provider.verifyAccessToken(apiKey.raw),
+      provider.verifyAccessToken(apiKey),
     ]);
     assert.deepEqual(outcomes.map((outcome) => outcome.status), ['rejected', 'rejected', 'rejected', 'rejected', 'rejected']);
   } finally {
     s.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
