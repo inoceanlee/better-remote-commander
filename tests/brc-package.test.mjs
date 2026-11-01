@@ -10,7 +10,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const packer = path.join(repoRoot, 'scripts', 'pack-brc.mjs');
 const requiredFiles = [
   'package/package.json',
   'package/README.md',
@@ -157,21 +156,13 @@ async function makePackageFixture(t) {
       updatedTarball: path.resolve(process.env.BRC_PACKAGE_UPDATED_TARBALL),
     };
   }
-  const outputDir = path.join(root, 'packed');
-  run(process.execPath, [packer, outputDir, '--with-next-patch'], { timeout: 120_000 });
-  const archives = (await readdir(outputDir)).filter((name) => name.endsWith('.tgz'));
-  assert.equal(archives.length, 1, 'packer must produce exactly one primary tarball');
-  const updateDir = path.join(outputDir, 'next-patch');
-  const updateArchives = (await readdir(updateDir)).filter((name) => name.endsWith('.tgz'));
-  assert.equal(updateArchives.length, 1, 'packer must produce exactly one next-patch tarball');
-  return {
-    root,
-    tarball: path.join(outputDir, archives[0]),
-    updatedTarball: path.join(updateDir, updateArchives[0]),
-  };
+  throw new Error('Package archives are missing. Run pnpm test:package to build and verify both archives.');
 }
 
-test('single package tarball is complete, self-contained, and globally installable', { timeout: 180_000 }, async (t) => {
+test('single package tarball is complete, self-contained, and globally installable', {
+  timeout: 180_000,
+  skip: !process.env.BRC_PACKAGE_TARBALL && 'Run pnpm test:package to generate and verify release archives.',
+}, async (t) => {
   const { root, tarball, updatedTarball } = await makePackageFixture(t);
   for (const file of [tarball, updatedTarball]) {
     const handle = await open(file, 'r');
