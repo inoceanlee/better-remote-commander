@@ -19,6 +19,10 @@ export interface BrcSettings {
     maxTotalMiB: number;
     rotateMiB: number;
   };
+  audit: {
+    retentionDays: number;
+    maxEntries: number;
+  };
   runtime: {
     startupTimeoutMs: number;
     shutdownTimeoutMs: number;
@@ -39,6 +43,8 @@ export interface BrcSettingValues {
   'logs.retentionDays': number;
   'logs.maxTotalMiB': number;
   'logs.rotateMiB': number;
+  'audit.retentionDays': number;
+  'audit.maxEntries': number;
   'runtime.startupTimeoutMs': number;
   'runtime.shutdownTimeoutMs': number;
   'runtime.lockWaitMs': number;
@@ -59,6 +65,8 @@ export const BRC_SETTING_KEYS = [
   'services.healthPort',
   'services.publicUrl',
   'logs.retentionDays',
+  'audit.retentionDays',
+  'audit.maxEntries',
   'logs.maxTotalMiB',
   'logs.rotateMiB',
   'runtime.startupTimeoutMs',
@@ -77,6 +85,8 @@ export const SETTING_ENVIRONMENT_KEYS: Readonly<Record<BrcSettingKey, string>> =
   'services.healthPort': 'BRC_TRAEFIK_HEALTH_PORT',
   'services.publicUrl': 'BRC_PUBLIC_URL',
   'logs.retentionDays': 'BRC_LOG_RETENTION_DAYS',
+  'audit.retentionDays': 'BRC_AUDIT_RETENTION_DAYS',
+  'audit.maxEntries': 'BRC_AUDIT_MAX_ENTRIES',
   'logs.maxTotalMiB': 'BRC_LOG_MAX_TOTAL_MIB',
   'logs.rotateMiB': 'BRC_LOG_ROTATE_MIB',
   'runtime.startupTimeoutMs': 'BRC_RUNTIME_STARTUP_TIMEOUT_MS',
@@ -100,6 +110,7 @@ export const DEFAULT_SETTINGS: Readonly<BrcSettings> = Object.freeze({
   }),
   services: Object.freeze({ relayPort: 3000, proxyPort: 13001, healthPort: 13002, publicUrl: '' }),
   logs: Object.freeze({ retentionDays: 7, maxTotalMiB: 50, rotateMiB: 4 }),
+  audit: Object.freeze({ retentionDays: 30, maxEntries: 50_000 }),
   runtime: Object.freeze({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 3_000, lockWaitMs: 3_000, lockPollMs: 50 }),
 });
 
@@ -121,6 +132,7 @@ function copySettings(settings: Readonly<BrcSettings>): BrcSettings {
     },
     services: { ...settings.services },
     logs: { ...settings.logs },
+    audit: { ...settings.audit },
     runtime: { ...settings.runtime },
   };
 }
@@ -172,8 +184,14 @@ function validateSettingValue(key: BrcSettingKey, value: unknown): number | stri
     if (value < 1 || value > 65535) throw new Error(`${key} must be an integer from 1 to 65535.`);
     return value;
   }
-  if (key === 'logs.retentionDays') {
+  if (key === 'logs.retentionDays' || key === 'audit.retentionDays') {
     if (value < 0) throw new Error(`${key} must be zero or greater.`);
+    return value;
+  }
+  if (key === 'audit.maxEntries') {
+    if (value < 1 || value > DEFAULT_SETTINGS.audit.maxEntries) {
+      throw new Error(`${key} must be an integer from 1 to ${DEFAULT_SETTINGS.audit.maxEntries}.`);
+    }
     return value;
   }
   if (value < 1) throw new Error(`${key} must be greater than zero.`);
