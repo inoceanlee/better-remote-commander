@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { SqliteStore } from '../packages/relay/dist/store/sqlite.js';
 import os from 'node:os';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -32,6 +33,30 @@ const forbiddenFiles = [
   /(^|\/)node_modules\/\.pnpm(?:\/|$)/,
 ];
 
+const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^BRC_/i.test(name)));
+
+async function allocateServicePorts() {
+  const servers = [];
+  try {
+    while (servers.length < 3) {
+      const server = createServer();
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      servers.push(server);
+    }
+    const ports = servers.map((server) => server.address().port);
+    assert.equal(new Set(ports).size, 3);
+    assert.ok(ports.every((port) => ![3000, 13001, 13002].includes(port)));
+    return ports;
+  } finally {
+    await Promise.all(servers.map((server) => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })));
+  }
+}
+
 
 function run(command, args, options = {}) {
   const isWindowsShim = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
@@ -45,6 +70,7 @@ function run(command, args, options = {}) {
     windowsVerbatimArguments: isWindowsShim,
     timeout: 30_000,
     maxBuffer: 32 * 1024 * 1024,
+    env: cleanEnv,
     ...options,
   });
   assert.equal(result.error, undefined, result.error?.message);
@@ -54,7 +80,7 @@ function run(command, args, options = {}) {
 
 function resolvePnpmCommand() {
   if (process.platform !== 'win32') return 'pnpm';
-  const result = spawnSync('where.exe', ['pnpm'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  const result = spawnSync('where.exe', ['pnpm'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, env: cleanEnv });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, `where.exe pnpm failed\n${result.stderr}`);
   const commands = result.stdout.split(/\r?\n/).filter(Boolean);
@@ -84,7 +110,7 @@ const testTraefikBinary = process.env.BRC_TRAEFIK_TEST_BINARY;
 
 async function stageTraefikTestBinary(dataRoot) {
   assert.ok(testTraefikBinary, 'Set BRC_TRAEFIK_TEST_BINARY to the official local Traefik v3.7+ executable.');
-  const result = spawnSync(testTraefikBinary, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  const result = spawnSync(testTraefikBinary, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, env: cleanEnv });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stderr);
   const version = result.stdout.match(/Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
@@ -234,7 +260,7 @@ console.log(JSON.stringify(services.map(({ name, entrypoint, cwd, env }) => ({ n
   const powershellShim = path.join(isolatedPath, 'brc.ps1');
   const installDir = path.join(root, 'global-install');
   const env = {
-    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_'))),
+    ...cleanEnv,
     PNPM_HOME: isolatedHome,
     PNPM_CONFIG_STORE_DIR: isolatedStore,
     PNPM_CONFIG_STATE_DIR: isolatedState,
@@ -243,12 +269,13 @@ console.log(JSON.stringify(services.map(({ name, entrypoint, cwd, env }) => ({ n
     PNPM_CONFIG_GLOBAL_BIN_DIR: isolatedPath,
     PATH: `${isolatedPath}${path.delimiter}${process.env.PATH ?? ''}`,
   };
+  const [relayPort, proxyPort, healthPort] = await allocateServicePorts();
   const isolatedEnv = {
     ...env,
     BRC_DATA_ROOT: path.join(root, 'brc-data'),
-    BRC_RELAY_PORT: '13000',
-    BRC_TRAEFIK_PORT: '13001',
-    BRC_TRAEFIK_HEALTH_PORT: '13002',
+    BRC_RELAY_PORT: String(relayPort),
+    BRC_TRAEFIK_PORT: String(proxyPort),
+    BRC_TRAEFIK_HEALTH_PORT: String(healthPort),
     PATH: `${isolatedPath}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ''}`,
   };
   await Promise.all([isolatedHome, isolatedStore, isolatedCache, isolatedState, isolatedPath, installDir].map((directory) => mkdir(directory, { recursive: true })));
