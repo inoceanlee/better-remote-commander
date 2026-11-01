@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ReleaseProgress } from './release-progress.mjs';
+import { withReleaseWorkspace } from './release-workspace.mjs';
 import { registryRepublishAt } from './npm-registry-policy.mjs';
 import { assertReleaseVersion } from './release-version.mjs';
 
@@ -127,37 +128,38 @@ async function main() {
   progress.print('Release: ' + name + '@' + version);
   const traefik = process.env.BRC_TRAEFIK_TEST_BINARY || path.resolve(root, '../traefik/traefik.exe');
   if (!existsSync(traefik)) throw new Error('Traefik test binary missing: ' + traefik);
-  const output = mkdtempSync(path.join(tmpdir(), 'brc-publish-'));
-  await progress.step(1, 5, '构建并打包（gzip 9 级）', async () => {
-    await command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--with-next-patch']);
+  await withReleaseWorkspace(async (output) => {
+    await progress.step(1, 5, '构建并打包（gzip 9 级）', async () => {
+      await command(process.execPath, [path.join(root, 'scripts/pack-brc.mjs'), output, '--with-next-patch']);
+    });
+    const archives = readdirSync(output).filter((file) => file.endsWith('.tgz'));
+    if (archives.length !== 1 || archives[0] !== 'inoceanlee-brc-' + version + '.tgz') throw new Error('Unexpected package archives.');
+    const archive = path.join(output, archives[0]);
+    const v = version.split('.').map(Number);
+    const nextVersion = [v[0], v[1], v[2] + 1].join('.');
+    const nextArchive = path.join(output, 'next-patch', 'inoceanlee-brc-' + nextVersion + '.tgz');
+    if (!existsSync(nextArchive)) throw new Error('Missing upgrade test archive.');
+    const env = { ...process.env, BRC_TRAEFIK_TEST_BINARY: traefik, BRC_PACKAGE_TARBALL: archive, BRC_PACKAGE_UPDATED_TARBALL: nextArchive };
+    await progress.step(2, 5, '完整单测与隔离安装', async () => {
+      await command('pnpm', ['test:unit'], { env });
+    });
+    await progress.step(3, 5, 'Traefik、OAuth 与 MCP E2E', async () => {
+      await command('pnpm', ['test:e2e'], { env });
+    });
+    await progress.step(4, 5, '检查 npm 发行包', async () => {
+      await command('npm', ['publish', archive, '--dry-run', '--access', 'public', '--registry', registry]);
+    });
+    if (dryRun) {
+      progress.print('Dry run passed. No package published.');
+      return;
+    }
+    await progress.step(5, 5, '发布 npm（终端身份认证）', async () => {
+      await command('npm', ['publish', archive, '--access', 'public', '--registry', registry], { interactive: true });
+    });
+    const receipt = { revision, version, tag, name };
+    saveReceipt(checkpoint, receipt);
+    await finishRelease(receipt);
   });
-  const archives = readdirSync(output).filter((file) => file.endsWith('.tgz'));
-  if (archives.length !== 1 || archives[0] !== 'inoceanlee-brc-' + version + '.tgz') throw new Error('Unexpected package archives.');
-  const archive = path.join(output, archives[0]);
-  const v = version.split('.').map(Number);
-  const nextVersion = [v[0], v[1], v[2] + 1].join('.');
-  const nextArchive = path.join(output, 'next-patch', 'inoceanlee-brc-' + nextVersion + '.tgz');
-  if (!existsSync(nextArchive)) throw new Error('Missing upgrade test archive.');
-  const env = { ...process.env, BRC_TRAEFIK_TEST_BINARY: traefik, BRC_PACKAGE_TARBALL: archive, BRC_PACKAGE_UPDATED_TARBALL: nextArchive };
-  await progress.step(2, 5, '完整单测与隔离安装', async () => {
-    await command('pnpm', ['test:unit'], { env });
-  });
-  await progress.step(3, 5, 'Traefik、OAuth 与 MCP E2E', async () => {
-    await command('pnpm', ['test:e2e'], { env });
-  });
-  await progress.step(4, 5, '检查 npm 发行包', async () => {
-    await command('npm', ['publish', archive, '--dry-run', '--access', 'public', '--registry', registry]);
-  });
-  if (dryRun) {
-    progress.print('Dry run passed. No package published.');
-    return;
-  }
-  await progress.step(5, 5, '发布 npm（终端身份认证）', async () => {
-    await command('npm', ['publish', archive, '--access', 'public', '--registry', registry], { interactive: true });
-  });
-  const receipt = { revision, version, tag, name };
-  saveReceipt(checkpoint, receipt);
-  await finishRelease(receipt);
 }
 main().catch((error) => {
   console.error('\nRelease stopped: ' + (error instanceof Error ? error.message : String(error)));
