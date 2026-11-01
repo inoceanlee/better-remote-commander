@@ -131,6 +131,12 @@ try {
   verifyPnpmIsolation();
   process.stdout.write('BRC_DETAIL:构建工作区包\n');
   runPnpm(['-r', '--filter', './packages/*', 'build'], workspaceRoot);
+  process.stdout.write('BRC_DETAIL:校验 Windows 原生进程查询器\n');
+  const native = spawnSync(process.execPath, [path.join(workspaceRoot, 'scripts', 'build-native.mjs')], {
+    cwd: workspaceRoot, stdio: 'inherit', windowsHide: true, timeout: 240_000,
+  });
+  if (native.error) throw native.error;
+  if (native.status !== 0) throw new Error('Native process inspector build failed.');
 
   const manifests = await Promise.all(sourcePackages.map(async (name) =>
     JSON.parse(await readFile(path.join(packageDir, name, 'package.json'), 'utf8'))));

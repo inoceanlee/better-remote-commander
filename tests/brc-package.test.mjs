@@ -15,6 +15,7 @@ const requiredFiles = [
   'package/README.md',
   'package/LICENSE',
   'package/dist/cli.js',
+  'package/dist/native/win32-x64/brc-process.exe',
   'package/dist/services/relay/cli.js',
   'package/dist/services/agent/cli.js',
   'package/dist/maintenance/uninstall-worker.js',
@@ -209,9 +210,20 @@ test('single package tarball is complete, self-contained, and globally installab
 
   const inspectionDir = path.join(root, 'inspection');
   const extractedPackage = path.join(inspectionDir, 'package');
-  const distFiles = names.filter((name) => name.startsWith('package/dist/') && name.endsWith('.js'));
+  const distFiles = names.filter((name) => name.startsWith('package/dist/') && (name.endsWith('.js') || name === 'package/dist/native/win32-x64/brc-process.exe'));
   await mkdir(inspectionDir);
   run('tar', ['-xzf', tarball, '-C', inspectionDir, ...distFiles]);
+  if (process.platform === 'win32') {
+    const native = path.join(extractedPackage, 'dist', 'native', 'win32-x64', 'brc-process.exe');
+    const bytes = await readFile(native);
+    assert.equal(bytes.toString('ascii', 0, 2), 'MZ');
+    const pe = bytes.readUInt32LE(0x3c);
+    assert.equal(bytes.toString('ascii', pe, pe + 4), 'PE\0\0');
+    assert.equal(bytes.readUInt16LE(pe + 4), 0x8664);
+    const response = JSON.parse(run(native, ['inspect', String(process.pid)]));
+    assert.equal(response.processes[0].status, 'found');
+    assert.equal(response.processes[0].pid, process.pid);
+  }
   await writeFile(path.join(extractedPackage, 'package.json'), `${JSON.stringify(manifest)}\n`);
   if (process.platform !== 'win32') {
     const cliMode = (await stat(path.join(extractedPackage, 'dist/cli.js'))).mode;
