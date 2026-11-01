@@ -201,6 +201,106 @@ test('removes ready and lock records for an exited process', async (t) => {
   assert.equal(await exists(lock), false);
 });
 
+function runSimulatedCimCleanup(root, scenario) {
+  const cleanupUrl = new URL('../packages/cli/dist/maintenance/cleanup.js', import.meta.url).href;
+  const source = `
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import path from 'node:path';
+
+const root = ${JSON.stringify(root)};
+const scenario = ${JSON.stringify(scenario)};
+const paths = Object.fromEntries(['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'].map((name) => [name, path.join(root, name)]));
+paths.root = root;
+const lock = path.join(paths.runtime, 'lifecycle.lock');
+const ready = path.join(paths.runtime, 'relay.sample.ready.json');
+const lockContents = JSON.stringify({ pid: 12, createdAt: 'old', executablePath: process.execPath, commandLine: 'old' });
+const readyContents = JSON.stringify({ pid: 12 });
+const files = [];
+if (scenario === 'batch' || scenario === 'failure') {
+  for (const name of ['relay', 'traefik', 'agent']) {
+    const filename = path.join(paths.runtime, name + '.json');
+    writeFileSync(filename, JSON.stringify({
+      version: 1, service: name, id: '12345678-1234-1234-1234-123456789abc', pid: 11,
+      createdAt: 'old', executablePath: process.execPath, commandLine: 'old',
+      workspaceRoot: root, entrypoint: path.join(root, name + '.js'),
+      controlPort: 1234, controlToken: 'a'.repeat(64),
+    }));
+    files.push(filename);
+  }
+  writeFileSync(lock, lockContents);
+  writeFileSync(ready, readyContents);
+  files.push(lock, ready);
+} else {
+  writeFileSync(ready, readyContents);
+}
+
+Object.defineProperty(process, 'platform', { value: 'win32' });
+const queries = [];
+childProcess.execFileSync = (_file, args) => {
+  const query = args.at(-1);
+  queries.push(query);
+  if (scenario === 'failure') throw new Error('CIM access denied');
+  if (scenario === 'batch') {
+    return JSON.stringify([11, 12].map((pid) => ({
+      pid, createdAt: 'different', executablePath: process.execPath, commandLine: 'different',
+    })));
+  }
+  if (queries.length === 1) return '';
+  if (scenario === 'replacement') {
+    writeFileSync(ready, JSON.stringify({ pid: 13 }));
+    return '';
+  }
+  return JSON.stringify({ pid: 12, createdAt: 'new', executablePath: process.execPath, commandLine: 'new' });
+};
+syncBuiltinESMExports();
+const { cleanRuntime } = await import(${JSON.stringify(cleanupUrl)});
+const report = await cleanRuntime(paths);
+if (scenario === 'batch' || scenario === 'failure') {
+  assert.equal(queries.length, 1);
+  const pids = [...queries[0].matchAll(/ProcessId = (\\d+)/g)].map((match) => Number(match[1])).sort();
+  assert.deepEqual(pids, [11, 12]);
+  for (const filename of files) {
+    assert.ok(readFileSync(filename, 'utf8'));
+    assert.ok(report.preserved.some((item) => item.path === filename));
+  }
+  if (scenario === 'failure') {
+    for (const filename of files) {
+      assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM access denied')));
+    }
+  }
+} else {
+  assert.equal(queries.length, 2);
+  assert.equal(readFileSync(ready, 'utf8'), scenario === 'replacement' ? JSON.stringify({ pid: 13 }) : readyContents);
+  assert.ok(report.preserved.some((item) => item.path === ready && /changed|reused/i.test(item.reason)));
+}
+`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
+  assert.equal(child.status, 0, child.stderr);
+}
+
+test('cleanup deduplicates service, lock and ready PIDs in one CIM query', async (t) => {
+  const { root } = await makeRoot(t);
+  runSimulatedCimCleanup(root, 'batch');
+});
+
+test('cleanup preserves every record when CIM inspection fails', async (t) => {
+  const { root } = await makeRoot(t);
+  runSimulatedCimCleanup(root, 'failure');
+});
+
+test('cleanup preserves ready record when its PID is reused after the snapshot', async (t) => {
+  const { root } = await makeRoot(t);
+  runSimulatedCimCleanup(root, 'reuse');
+});
+
+test('cleanup preserves ready record replaced before removal', async (t) => {
+  const { root } = await makeRoot(t);
+  runSimulatedCimCleanup(root, 'replacement');
+});
+
 test('does not follow a directory junction outside the data root', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   const outside = await mkdtemp(path.join(os.tmpdir(), 'brc-clean-outside-'));
