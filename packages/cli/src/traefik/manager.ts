@@ -139,10 +139,11 @@ export class TraefikManager {
     return this.exclusive(async () => {
       const initial = await readManifest(this.paths.traefik);
       if (!initial?.previous) throw new Error('No previous Traefik version is available for rollback.');
-      const executable = await this.output.executableFor(initial.previous);
-      await this.progress('rollback', 'verify', () => this.verify(executable, initial.previous));
-      await this.progress('rollback', 'health', () => this.healthCheck(executable, initial.previous));
-      const rollback: VersionManifest = { version: 1, current: initial.previous, previous: initial.current };
+      const previousVersion = initial.previous;
+      const executable = await this.output.executableFor(previousVersion);
+      await this.progress('rollback', 'verify', () => this.verify(executable, previousVersion));
+      await this.progress('rollback', 'health', () => this.healthCheck(executable, previousVersion));
+      const rollback: VersionManifest = { version: 1, current: previousVersion, previous: initial.current };
       await this.lifecycle.withLock(async (operations) => {
         const installed = await readManifest(this.paths.traefik);
         if (!installed || installed.current !== initial.current || installed.previous !== initial.previous) {
