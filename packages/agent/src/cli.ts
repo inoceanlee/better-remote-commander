@@ -11,7 +11,7 @@ import { applyLegacyEnv, installManagedLog, startManagedControlServer, type Mana
 applyLegacyEnv();
 const managedLog = installManagedLog();
 import { WsClient } from './transport/ws-client.js';
-import { pairDevice, loadCredentials, clearCredentials, saveCredentials, type DeviceCredentials } from './transport/pairing.js';
+import { pairDevice, loadCredentials, clearCredentials, type DeviceCredentials } from './transport/pairing.js';
 import { callTool, listTools } from './dispatcher.js';
 import { VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
@@ -137,7 +137,6 @@ const start = (c: DeviceCredentials) => {
       log('warn', 'Relay rejected our device token; re-pairing');
       clearCredentials();
       const fresh = await pairDevice({ relayUrl: c.relayUrl, name: c.name, deviceId: c.deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
-      saveCredentials(fresh);
       start(fresh);
       return true;
     },

@@ -4,6 +4,10 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'no
 import os from 'node:os';
 import path from 'node:path';
 import { pairDevice, loadCredentials } from '../packages/agent/dist/transport/pairing.js';
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 const start = { device_code: 'code', user_code: 'USER', verification_uri: 'https://relay.example/verify', verification_uri_complete: 'https://relay.example/verify?code=USER', expires_in: 30, interval: 2 };
 
@@ -89,4 +93,64 @@ test('legacy credential files remain readable', async (t) => {
   const legacy = { relayUrl: 'https://old.example', deviceId: 'old-id', deviceToken: 'old-token', name: 'old', pairedAt: '2020-01-01T00:00:00.000Z' };
   writeFileSync(s.file, JSON.stringify(legacy));
   assert.deepEqual(loadCredentials(), legacy);
+});
+
+test('agent saves newly approved credentials once when a relay rejects its old token', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'brc-repair-'));
+  const home = path.join(root, 'home');
+  const trace = path.join(root, 'writes.log');
+  const preload = path.join(root, 'trace.cjs');
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(home);
+  writeFileSync(preload, `
+    const fs = require('node:fs');
+    const original = fs.writeFileSync;
+    fs.writeFileSync = function(file, ...args) {
+      if (String(file) === process.env.PAIRING_CREDENTIAL_FILE) {
+        fs.appendFileSync(process.env.PAIRING_WRITE_TRACE, 'write\\n');
+      }
+      return original.call(this, file, ...args);
+    };
+    require('node:module').syncBuiltinESMExports();
+  `);
+  let upgrades = 0;
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/device/start') return res.end(JSON.stringify({ ...start, expires_in: 30 }));
+    if (req.url === '/device/poll') return res.end(JSON.stringify({ device_token: 'new-token', device_id: 'old-id' }));
+    res.writeHead(404).end('{}');
+  });
+  server.on('upgrade', (req, socket) => {
+    upgrades++;
+    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const relayUrl = `http://127.0.0.1:${server.address().port}`;
+  const file = path.join(home, 'device.json');
+  writeFileSync(file, JSON.stringify({ relayUrl, deviceId: 'old-id', deviceToken: 'old-token', name: 'old agent', pairedAt: '2020-01-01T00:00:00.000Z' }));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_')));
+  const child = spawn(process.execPath, ['--require', preload, fileURLToPath(new URL('../packages/agent/dist/cli.js', import.meta.url)), '--no-browser'], {
+    env: { ...env, BRC_HOME: home, BRC_UPSTREAM_TELEMETRY: '0', PAIRING_CREDENTIAL_FILE: file, PAIRING_WRITE_TRACE: trace },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { output += chunk; });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.kill();
+      await exited;
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  });
+  for (let i = 0; i < 150 && upgrades < 2 && child.exitCode === null; i++) await sleep(100);
+  assert.ok(upgrades >= 2, `agent did not reconnect after re-pairing:\n${output}`);
+  assert.equal(readFileSync(trace, 'utf8'), 'write\n');
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(saved.deviceToken, 'new-token');
+  assert.equal(saved.deviceId, 'old-id');
+  assert.equal(saved.relayUrl, relayUrl);
 });
