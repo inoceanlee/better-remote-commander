@@ -255,3 +255,42 @@ test('config set persists validated settings in the selected data root', async (
   const config = await readFile(path.join(root, 'config', 'brc.yaml'), 'utf8');
   assert.match(config, /average: 20/);
 });
+test('interactive first setup asks for password and confirmation before accepting credentials', async () => {
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const prompts = [];
+  const answers = ['example-password', 'example-password'];
+  const credentials = await collectAdministratorCredentials({ BRC_ADMIN_USER: 'operator' }, true, {
+    askUsername: async () => { throw new Error('username must come from environment'); },
+    askHiddenPassword: async (label) => { prompts.push(label); return answers.shift(); },
+  });
+  assert.deepEqual(credentials, { username: 'operator', password: 'example-password' });
+  assert.deepEqual(prompts, ['Administrator password (hidden): ', 'Confirm administrator password (hidden): ']);
+});
+
+test('interactive first setup rejects mismatched passwords before creating an identity', async () => {
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const prompts = [];
+  const answers = ['example-password', 'different-password'];
+  await assert.rejects(collectAdministratorCredentials({}, true, {
+    askUsername: async () => 'admin',
+    askHiddenPassword: async (label) => { prompts.push(label); return answers.shift(); },
+  }), /passwords do not match/i);
+  assert.equal(prompts.length, 2);
+});
+
+test('explicit environment password keeps noninteractive setup compatible', async () => {
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const credentials = await collectAdministratorCredentials({ BRC_ADMIN_USER: 'ci', BRC_ADMIN_PASSWORD: 'example-password' }, false, {
+    askUsername: async () => { throw new Error('must not prompt'); },
+    askHiddenPassword: async () => { throw new Error('must not prompt'); },
+  });
+  assert.deepEqual(credentials, { username: 'ci', password: 'example-password' });
+});
+
+test('first setup without a terminal or supplied password refuses to initialize', async () => {
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  await assert.rejects(collectAdministratorCredentials({}, false, {
+    askUsername: async () => { throw new Error('must not prompt'); },
+    askHiddenPassword: async () => { throw new Error('must not prompt'); },
+  }), /interactive terminal.*administrator password/i);
+});

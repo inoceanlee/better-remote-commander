@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
-import { createInterface } from 'node:readline/promises';
-import { Writable } from 'node:stream';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runConfigCommand } from './commands/config.js';
+import { requestAdministrator } from './commands/setup/input.js';
 import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
 import { SettingsManager } from './config/manager.js';
 import { readSettings } from './config/reader.js';
@@ -187,37 +186,6 @@ function traefikSettingsChanged(previous: Readonly<BrcSettings>, next: Readonly<
     || previous.services.healthPort !== next.services.healthPort;
 }
 
-
-async function requestAdministrator(): Promise<{ username: string; password: string }> {
-  const suppliedPassword = process.env.BRC_ADMIN_PASSWORD;
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (suppliedPassword === undefined && !interactive) {
-    throw new Error('First setup requires an interactive terminal to set the administrator password.');
-  }
-
-  let username = process.env.BRC_ADMIN_USER?.trim();
-  if (!username && interactive) {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try { username = (await rl.question('Administrator username [admin]: ')).trim(); }
-    finally { rl.close(); }
-  }
-  username ||= 'admin';
-
-  let password = suppliedPassword;
-  if (password === undefined) {
-    const silentOutput = new Writable({ write(_chunk, _encoding, done) { done(); } });
-    const rl = createInterface({ input: process.stdin, output: silentOutput, terminal: true });
-    try {
-      process.stdout.write('Administrator password (hidden): ');
-      password = await rl.question('');
-    } finally {
-      rl.close();
-      process.stdout.write('\n');
-    }
-  }
-  if (password.length < 8) throw new Error('Administrator password must contain at least 8 characters.');
-  return { username, password };
-}
 
 async function main(): Promise<void> {
   const paths = resolveBrcPaths(process.env);
