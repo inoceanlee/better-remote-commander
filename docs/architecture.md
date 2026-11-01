@@ -37,9 +37,9 @@ BRC 是面向 Windows x64 的单一 npm 包 `@inoceanlee/brc`。CLI 统一管理
 
 用户数据根默认为 `%LOCALAPPDATA%\BRC\`，可通过 `BRC_DATA_ROOT` 更改。唯一可编辑配置文件为 `config/brc.yaml`，使用 `brc config show/get/set/apply/path` 管理。默认值、类型和校验集中在 `packages/cli/src/config/settings.ts`。
 
-Relay 使用 SQLite 保存管理员、OAuth 客户端、访问令牌和设备归属。正常重启、升级和配置应用保留这些身份。数据库缺失、归属不一致或管理员异常时，拒绝危险的自动重建；新建数据库由 `brc setup` 初始化。
+Relay 使用 SQLite 保存管理员、OAuth 客户端、访问令牌和设备归属。审计默认保留 30 天、50,000 条，定期分批清理。正常重启、升级和配置应用保留这些身份。数据库缺失、归属不一致或管理员异常时，拒绝危险的自动重建；新建数据库由 `brc setup` 初始化。
 
-Agent 向 Relay 主动建立 WebSocket 连接，经设备配对获取凭据。ChatGPT 等客户端通过 OAuth 授权访问 `/mcp`；Relay 对工具调用执行设备选择、鉴权和审计。Traefik 的全站限流及并发限制只是入口资源保护，不替代 Relay 身份认证。
+Agent 向 Relay 主动建立 WebSocket 连接，经设备配对获取凭据。凭据采用原子保存；已有有效配对时拒绝自动覆盖。PowerShell 5.1/7 和 CMD 在新 Shell 进程内探测实际输入输出编码，不改变用户 Profile。ChatGPT 等客户端通过 OAuth 授权访问 `/mcp`；Relay 对工具调用执行设备选择、鉴权和审计。Traefik 的全站限流及并发限制只是入口资源保护，不替代 Relay 身份认证。
 
 ## 生命周期与边界
 
@@ -53,4 +53,4 @@ Traefik 使用单条公共路由共享限流和并发约束。服务只绑定 `1
 
 验证入口为 `pnpm test:unit`、`pnpm test:e2e` 和 `pnpm test:package`。E2E 在独立临时数据库、凭据与随机 loopback 端口运行；设置 `BRC_TRAEFIK_TEST_BINARY` 可将官方 Traefik 纳入 E2E。测试不得影响当前运行的 BRC。
 
-`pnpm release:brc` 使用 CLI 清单中的明确版本，生成 gzip 9 发行包、运行隔离测试并发布到 npm。只有注册表确认发布后才创建 `brc-v<version>` Git 标签。发布失败的恢复与发行包精简属于独立维护任务；GitHub CI 只验证源码，不自动发布。
+`pnpm release:brc` 使用 CLI 清单中的明确版本，生成 gzip 9 发行包、运行隔离测试并发布到 npm。只有注册表确认发布后才创建 `brc-v<version>` Git 标签。发布流程使用独立互斥锁和经过哈希校验的归档检查点；不明确的上传结果不得自动重试。发行包依照锁文件安装依赖，只在独立暂存目录精简非运行时文件。`--dry-run` 验证构建、单测、安装升级和 Traefik E2E，不上传 npm 或创建标签。GitHub CI 只验证源码，不自动发布。
