@@ -210,7 +210,7 @@ export class ProcessManager {
         else if (!sameIdentity(current, identity, spec)) throw new Error(`${spec.name} process identity does not match its saved record; refusing to start or stop it.`);
         else {
           const health = await this.readHealth(current);
-          if (health.state === 'running' && health.ok) return;
+          if ((health.state === 'running' && health.ok) || (spec.name === 'agent' && health.state === 'pairing')) return;
           throw new Error(`${spec.name} is already managed but unhealthy: ${health.detail}`);
         }
       }

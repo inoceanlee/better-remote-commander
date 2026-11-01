@@ -15,7 +15,7 @@ import { startManagedControlServer } from '../packages/shared/dist/managed-contr
 
 const fakeService = `
 import { createServer } from 'node:http';
-import { renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, renameSync, writeFileSync } from 'node:fs';
 const mode = process.env.BRC_TEST_MODE ?? 'normal';
 const token = process.env.BRC_CONTROL_TOKEN;
 const readyFile = process.env.BRC_CONTROL_READY_FILE;
@@ -41,8 +41,13 @@ const control = createServer((req, res) => {
     return;
   }
   if (req.method === 'GET' && req.url === '/health') {
+    if (process.env.BRC_TEST_HEALTH_TRACE) appendFileSync(process.env.BRC_TEST_HEALTH_TRACE, 'health\\n');
     healthHits++;
     if (mode === 'flaky' && healthHits === 2) { req.socket.destroy(); return; }
+    if (mode === 'exit-on-health') {
+      req.socket.destroy();
+      process.exit(0);
+    }
     if (Date.now() < healthyAt) {
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: false, state: 'starting', detail: 'starting' }));
@@ -54,7 +59,6 @@ const control = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
-    if (mode === 'exit-on-health') res.on('finish', () => process.exit(0));
     res.end(JSON.stringify({ ok: true, state: 'running', detail: 'fake service ready' }));
     return;
   }
@@ -243,7 +247,8 @@ test('transient health transport errors do not mark a responsive process degrade
 });
 
 test('unpaired agent starts without treating human approval as a process failure', async (t) => {
-  const harness = await makeHarness(t, { name: 'agent', mode: 'pairing', startupTimeoutMs: 700 });
+  const harness = await makeHarness(t, { name: 'agent', mode: 'pairing', startupTimeoutMs: 15_000 });
+  await harness.manager.start(harness.spec);
   await harness.manager.start(harness.spec);
   assert.equal((await harness.manager.status(harness.spec)).state, 'pairing');
 });
@@ -259,6 +264,24 @@ test('startup health polling does not repeat process identity inspection', async
   assert.equal(inspections, 1);
 });
 
+test('startup identity inspection shares the ready and health deadline', async (t) => {
+  let inspections = 0;
+  const harness = await makeHarness(t, {
+    startupTimeoutMs: 3000,
+    processOptions: { inspectProcess: async (pid) => {
+      inspections++;
+      const identity = await inspectProcess(pid);
+      if (inspections === 1) await sleep(3100);
+      return identity;
+    } },
+  });
+  const trace = path.join(harness.root, 'health-trace');
+  harness.spec.env.BRC_TEST_HEALTH_TRACE = trace;
+  await assert.rejects(harness.manager.start(harness.spec), /healthy|timeout/i);
+  assert.ok(inspections >= 1);
+  await assert.rejects(readFile(trace, 'utf8'), { code: 'ENOENT' });
+});
+
 test('startup rejects a child that exits during readiness and removes its record', async (t) => {
   const harness = await makeHarness(t, { mode: 'exit-on-health', startupTimeoutMs: 5000 });
   await assert.rejects(harness.manager.start(harness.spec), /exited|healthy/i);
@@ -272,7 +295,8 @@ test('runtime timeout updates apply to the next managed process start', async (t
     env: { BRC_TEST_READY_BEFORE_READY_DELAY: '200' },
   });
 
-  harness.manager.updateRuntimeSettings({ startupTimeoutMs: 1000, shutdownTimeoutMs: 500 });
+  await assert.rejects(harness.manager.start(harness.spec), /ready|timeout/i);
+  harness.manager.updateRuntimeSettings({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 500 });
   await harness.manager.start(harness.spec);
 
   assert.equal((await harness.manager.status(harness.spec)).state, 'running');
