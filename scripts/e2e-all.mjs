@@ -97,6 +97,8 @@ try {
     BRC_LOG_FILE: path.join(scratch, 'relay.log'),
     BRC_PRODUCT_VERSION: productVersion,
     BRC_LOG_ROTATE_MIB: '1',
+    BRC_AUDIT_RETENTION_DAYS: String(DEFAULT_SETTINGS.audit.retentionDays),
+    BRC_AUDIT_MAX_ENTRIES: String(DEFAULT_SETTINGS.audit.maxEntries),
     LOG_LEVEL: 'warn',
   };
   if (USE_TRAEFIK) {
@@ -135,7 +137,18 @@ try {
   if (initialized.error) throw initialized.error;
   if (initialized.status !== 0) throw new Error(`Relay database initialization failed: ${initialized.stderr.trim() || initialized.stdout.trim()}`);
   const relay = start('relay', [relayCli], relayEnv);
-  await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
+  try {
+    await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
+  } catch (error) {
+    const probe = async (url) => fetch(url).then(async (r) => ({
+      status: r.status, body: (await r.text()).slice(0, 120),
+    })).catch((e) => ({ error: e.message }));
+    throw new Error(`Relay readiness check failed: ${JSON.stringify({
+      relayExit: relay.exitCode,
+      direct: await probe(`http://127.0.0.1:${RELAY_PORT}/health`),
+      throughTraefik: await probe(`${base}/health`),
+    })}`, { cause: error });
+  }
 
   const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home'), BRC_PRODUCT_VERSION: productVersion });
   const code = await waitFor(() => agent.out.match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 20_000, 'pairing code');
@@ -165,6 +178,7 @@ try {
   failed++;
   console.error('runner error:', e instanceof Error ? e.message : e);
   for (const p of procs) if (p.out) console.error(p.out.slice(-800));
+  try { console.error('relay log:', readFileSync(path.join(scratch, 'relay.log'), 'utf8').slice(-5000)); } catch {}
 } finally {
   if (failed) for (const p of procs) if (p.out) console.error(`\n--- ${p.spawnargs?.[1]?.split(/[\\/]/).slice(-3).join('/')} output ---\n${p.out.slice(-3000)}`);
   for (const p of procs) { try { p.kill('SIGTERM'); } catch {} }
