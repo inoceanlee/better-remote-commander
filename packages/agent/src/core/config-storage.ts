@@ -31,7 +31,18 @@ export class ConfigStorage {
     const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     try {
       await fs.writeFile(tempPath, JSON.stringify(config, null, 2), 'utf8');
-      await fs.rename(tempPath, this.configPath);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await fs.rename(tempPath, this.configPath);
+          break;
+        } catch (error) {
+          const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+          if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String(code)) || attempt >= 3) {
+            throw error;
+          }
+          await delay(20 * (attempt + 1));
+        }
+      }
     } finally {
       await fs.unlink(tempPath).catch(() => {});
     }

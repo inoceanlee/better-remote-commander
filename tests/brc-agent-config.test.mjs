@@ -231,3 +231,41 @@ test('filesystem tool preserves unrestricted empty directory list', async (t) =>
   });
   assert.equal(child.status, 0, child.stderr);
 });
+
+test('configuration writes retry transient Windows rename contention without losing data', { skip: process.platform !== 'win32' }, async (t) => {
+  const fsPromises = (await import('node:fs/promises')).default;
+  const { ConfigStorage } = await import('../packages/agent/dist/core/config-storage.js');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'brc-rename-retry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const filename = path.join(dir, 'config.json');
+  const storage = new ConfigStorage(filename);
+  await storage.prepare();
+  await writeFile(filename, '{"marker":"previous"}');
+  const realRename = fsPromises.rename;
+  t.after(() => { fsPromises.rename = realRename; });
+  let attempts = 0;
+  fsPromises.rename = async (...args) => {
+    attempts++;
+    if (attempts === 1) throw Object.assign(new Error('Windows sharing violation'), { code: 'EPERM' });
+    return realRename(...args);
+  };
+  await storage.write({ marker: 'updated' });
+  assert.equal(attempts, 2);
+  assert.equal(JSON.parse(await readFile(filename, 'utf8')).marker, 'updated');
+});
+
+test('persistent rename denial preserves the existing configuration', { skip: process.platform !== 'win32' }, async (t) => {
+  const fsPromises = (await import('node:fs/promises')).default;
+  const { ConfigStorage } = await import('../packages/agent/dist/core/config-storage.js');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'brc-rename-denied-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const filename = path.join(dir, 'config.json');
+  const original = '{"marker":"protected"}';
+  await writeFile(filename, original);
+  const realRename = fsPromises.rename;
+  fsPromises.rename = async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+  try {
+    await assert.rejects(new ConfigStorage(filename).write({ marker: 'replaced' }), { code: 'EACCES' });
+    assert.equal(await readFile(filename, 'utf8'), original);
+  } finally { fsPromises.rename = realRename; }
+});
