@@ -45,8 +45,15 @@ export class LockStore {
 
   async acquire(owner: LockOwner): Promise<boolean> {
     if (!validOwner(owner, this.paths.root)) throw new Error('Invalid lifecycle lock owner.');
-    await mkdir(this.paths.runtime, { recursive: true });
-    await this.verifyDirectory(this.paths.root);
+    try {
+      await this.verifyDirectory(this.paths.root);
+    } catch (error) {
+      if (code(error) !== 'ENOENT') throw error;
+      await mkdir(this.paths.root, { recursive: true });
+      await this.verifyDirectory(this.paths.root);
+    }
+    try { await mkdir(this.paths.runtime); }
+    catch (error) { if (code(error) !== 'EEXIST') throw error; }
     await this.verifyDirectory(this.paths.runtime);
     const stage = await mkdtemp(path.join(this.paths.runtime, '.lifecycle-stage-'));
     try {
@@ -66,6 +73,11 @@ export class LockStore {
       try { await unlink(path.join(stage, 'owner.json')); } catch (error) { if (code(error) !== 'ENOENT') throw error; }
       try { await rmdir(stage); } catch (error) { if (code(error) !== 'ENOENT') throw error; }
     }
+  }
+
+  async isMissing(): Promise<boolean> {
+    try { await lstat(this.lockPath); return false; }
+    catch (error) { if (code(error) === 'ENOENT') return true; throw error; }
   }
 
   async readOwner(): Promise<LockSnapshot> {
