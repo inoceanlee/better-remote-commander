@@ -1,12 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { BrcPaths } from '../config/paths.js';
 import { DEFAULT_SETTINGS, HEALTH_REQUEST_TIMEOUT_MS, HEALTH_RETRY_COUNT, IDENTITY_INSPECTION_RETRY_COUNT, type BrcSettings } from '../config/settings.js';
+import { inspectProcess, inspectProcesses, type ProcessIdentity } from './identity.js';
+export { inspectProcess } from './identity.js';
+export type { ProcessIdentity } from './identity.js';
 
 export type ManagedServiceName = 'relay' | 'traefik' | 'agent';
 export type ServiceState = 'stopped' | 'starting' | 'pairing' | 'running' | 'degraded';
@@ -28,12 +31,6 @@ export interface ManagedServiceSpec {
   startupTimeoutMs?: number;
 }
 
-export interface ProcessIdentity {
-  pid: number;
-  createdAt: string;
-  executablePath: string;
-  commandLine: string;
-}
 
 export interface ManagedProcessRecord extends ProcessIdentity {
   version: 1;
@@ -172,85 +169,13 @@ function errorCode(error: unknown): string | undefined {
   return undefined;
 }
 
-function exitStatus(error: unknown): number | undefined {
-  if (error && typeof error === 'object' && 'status' in error && typeof error.status === 'number') return error.status;
-  return undefined;
-}
-
-function parseProcessIdentity(value: unknown): ProcessIdentity | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (!('pid' in value) || !('createdAt' in value) || !('executablePath' in value) || !('commandLine' in value)) return null;
-  if (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0
-      || typeof value.createdAt !== 'string' || typeof value.executablePath !== 'string'
-      || typeof value.commandLine !== 'string') return null;
-  return { pid: value.pid, createdAt: value.createdAt, executablePath: value.executablePath, commandLine: value.commandLine };
-}
-
-export async function inspectProcess(pid: number): Promise<ProcessIdentity | null> {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`Invalid process ID: ${pid}`);
-
-  if (process.platform === 'win32') {
-    const windowsRoot = process.env.SystemRoot || 'C:\\Windows';
-    const powershell = path.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const script = `Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object @{Name='pid';Expression={$_.ProcessId}},@{Name='createdAt';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}},@{Name='executablePath';Expression={$_.ExecutablePath}},@{Name='commandLine';Expression={$_.CommandLine}} | ConvertTo-Json -Compress`;
-    const output = execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8',
-      timeout: 5_000,
-      windowsHide: true,
-      maxBuffer: 64 * 1024,
-    }).trim();
-    if (!output) return null;
-    const identity = parseProcessIdentity(JSON.parse(output));
-    if (!identity) throw new Error(`Windows returned incomplete identity for process ${pid}.`);
-    return identity;
-  }
-
-  if (process.platform === 'linux') {
-    let stat: string;
-    let executablePath: string;
-    let rawCommand: Buffer;
-    try {
-      [stat, executablePath, rawCommand] = await Promise.all([
-        readFile(`/proc/${pid}/stat`, 'utf8'),
-        realpath(`/proc/${pid}/exe`),
-        readFile(`/proc/${pid}/cmdline`),
-      ]);
-    } catch (error) {
-      if (errorCode(error) === 'ENOENT') return null;
-      throw error;
-    }
-    const closeParen = stat.lastIndexOf(')');
-    if (closeParen < 0) throw new Error(`Linux returned malformed process identity for ${pid}.`);
-    const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
-    const startTicks = fields[19];
-    if (!startTicks) throw new Error(`Linux returned incomplete start time for process ${pid}.`);
-    const bootId = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
-    const commandLine = rawCommand.toString('utf8').split('\0').filter(Boolean).join(' ');
-    if (!commandLine) return null;
-    return { pid, createdAt: `${bootId}:${startTicks}`, executablePath, commandLine };
-  }
-
-  if (process.platform === 'darwin') {
-    try {
-      const createdAt = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', windowsHide: true }).trim();
-      const executablePath = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', windowsHide: true }).trim();
-      const commandLine = execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', windowsHide: true }).trim();
-      if (!createdAt || !executablePath || !commandLine) return null;
-      return { pid, createdAt, executablePath, commandLine };
-    } catch (error) {
-      if (exitStatus(error) === 1) return null;
-      throw error;
-    }
-  }
-
-  throw new Error(`Managed process inspection is unsupported on ${process.platform}.`);
-}
 
 export class ProcessManager {
   private startupTimeoutMs: number;
   private shutdownTimeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly inspect: ProcessInspector;
+  private readonly customInspector: boolean;
   private readonly starting = new Map<ManagedServiceName, number | null>();
 
   constructor(private readonly paths: BrcPaths, options: ProcessManagerOptions = {}) {
@@ -258,6 +183,7 @@ export class ProcessManager {
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SETTINGS.runtime.shutdownTimeoutMs;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.inspect = options.inspectProcess ?? inspectProcess;
+    this.customInspector = options.inspectProcess !== undefined;
   }
   updateRuntimeSettings(settings: Readonly<Pick<BrcSettings['runtime'], 'startupTimeoutMs' | 'shutdownTimeoutMs'>>): void {
     this.startupTimeoutMs = settings.startupTimeoutMs;
@@ -387,6 +313,50 @@ export class ProcessManager {
     } catch (error) {
       return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Health check failed: ${processErrorMessage(error)}` };
     }
+  }
+
+  async statusMany(specs: readonly ManagedServiceSpec[]): Promise<ServiceStatus[]> {
+    if (this.customInspector) return Promise.all(specs.map((spec) => this.status(spec)));
+    const entries = await Promise.all(specs.map(async (spec): Promise<{ spec: ManagedServiceSpec; record?: ManagedProcessRecord; status?: ServiceStatus }> => {
+      if (this.starting.has(spec.name)) {
+        return { spec, status: { name: spec.name, state: 'starting', pid: this.starting.get(spec.name) ?? null, detail: 'Service startup is in progress.' } };
+      }
+      try {
+        const record = await this.readRecord(spec);
+        return record ? { spec, record } : { spec, status: { name: spec.name, state: 'stopped', pid: null, detail: 'No managed process record.' } };
+      } catch (error) {
+        return { spec, status: { name: spec.name, state: 'degraded', pid: null, detail: processErrorMessage(error) } };
+      }
+    }));
+    const pids = entries.flatMap(({ record }) => record ? [record.pid] : []);
+    let identities = new Map<number, ProcessIdentity | null>();
+    let inspectionError: unknown;
+    if (pids.length) {
+      for (let attempt = 0; attempt <= IDENTITY_INSPECTION_RETRY_COUNT; attempt++) {
+        try {
+          identities = await inspectProcesses(pids);
+          inspectionError = undefined;
+          break;
+        } catch (error) {
+          inspectionError = error;
+          if (attempt < IDENTITY_INSPECTION_RETRY_COUNT) await sleep(this.pollIntervalMs);
+        }
+      }
+    }
+    return Promise.all(entries.map(async ({ spec, record, status }): Promise<ServiceStatus> => {
+      if (status) return status;
+      if (!record) throw new Error('Missing process record.');
+      if (inspectionError !== undefined) return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Cannot verify process identity: ${processErrorMessage(inspectionError)}` };
+      const identity = identities.get(record.pid);
+      if (!identity) return { name: spec.name, state: 'stopped', pid: null, detail: 'Recorded process has exited.' };
+      if (!sameIdentity(record, identity, spec)) return { name: spec.name, state: 'degraded', pid: record.pid, detail: 'Process identity changed; refusing process control.' };
+      try {
+        const health = await this.readHealth(record);
+        return { name: spec.name, state: health.state === 'pairing' && spec.name === 'agent' ? 'pairing' : health.ok && health.state === 'running' ? 'running' : 'degraded', pid: record.pid, detail: health.detail };
+      } catch (error) {
+        return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Health check failed: ${processErrorMessage(error)}` };
+      }
+    }));
   }
 
   private async inspectForStatus(pid: number): Promise<ProcessIdentity | null> {

@@ -8,6 +8,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { ProcessManager, inspectProcess } from '../packages/cli/dist/lifecycle/processes.js';
+import { inspectProcesses } from '../packages/cli/dist/lifecycle/identity.js';
 import { ServiceManager } from '../packages/cli/dist/lifecycle/services.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { startManagedControlServer } from '../packages/shared/dist/managed-control.js';
@@ -108,6 +109,64 @@ async function makeHarness(t, options = {}) {
   });
   return { root, paths: runtimePaths, spec, manager, entrypoint };
 }
+
+test('batch inspection validates and deduplicates process IDs', async () => {
+  assert.deepEqual(await inspectProcesses([]), new Map());
+  await assert.rejects(inspectProcesses([process.pid, 0]), /Invalid process ID/);
+  const identities = await inspectProcesses([process.pid, process.pid, 2147483647]);
+  assert.equal(identities.size, 2);
+  assert.equal(identities.get(process.pid)?.pid, process.pid);
+  assert.equal(identities.get(2147483647), null);
+});
+
+test('statusMany isolates record errors and honors the injected inspector', async (t) => {
+  let mismatch = false;
+  const harness = await makeHarness(t, { processOptions: { inspectProcess: async (pid) => {
+    const identity = await inspectProcess(pid);
+    return mismatch && identity ? { ...identity, createdAt: 'reused' } : identity;
+  }}});
+  await harness.manager.start(harness.spec);
+  const agent = service('agent', harness.entrypoint, harness.root);
+  await writeFile(path.join(harness.paths.runtime, 'agent.json'), '{');
+  mismatch = true;
+  const statuses = await harness.manager.statusMany([harness.spec, agent]);
+  assert.equal(statuses[0].state, 'degraded');
+  assert.match(statuses[0].detail, /identity/i);
+  assert.equal(statuses[1].state, 'degraded');
+  await assert.rejects(harness.manager.stop(harness.spec), /identity/i);
+  mismatch = false;
+});
+
+test('Windows batch uses one CIM query and rejects malformed results', () => {
+  const identityUrl = new URL('../packages/cli/dist/lifecycle/identity.js', import.meta.url).href;
+  const source = `
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+Object.defineProperty(process, 'platform', { value: 'win32' });
+let output = '';
+let calls = 0;
+childProcess.execFileSync = (_file, args) => {
+  calls++;
+  assert.match(args.at(-1), /ProcessId = 11 OR ProcessId = 12 OR ProcessId = 13/);
+  if (output instanceof Error) throw output;
+  return output;
+};
+syncBuiltinESMExports();
+const { inspectProcesses } = await import(${JSON.stringify(identityUrl)});
+output = JSON.stringify([{ pid: 11, createdAt: 'time', executablePath: 'node.exe', commandLine: 'node app' }, { pid: 13, createdAt: 'time', executablePath: 'node.exe', commandLine: 'node app' }]);
+const result = await inspectProcesses([11, 12, 13, 11]);
+assert.equal(calls, 1);
+assert.equal(result.get(12), null);
+assert.equal(result.get(13).pid, 13);
+for (const invalid of ['{', JSON.stringify({ pid: 11, createdAt: '', executablePath: 'node.exe', commandLine: 'node app' }), new Error('CIM failed')]) {
+  output = invalid;
+  await assert.rejects(inspectProcesses([11, 12, 13]));
+}
+`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
+  assert.equal(child.status, 0, child.stderr);
+});
 
 test('status retries a transient process inspection error before reporting degraded', async (t) => {
   let failNext = false;
