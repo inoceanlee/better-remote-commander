@@ -89,19 +89,26 @@ test('concurrent stale-lock recovery keeps one release owner active', async (t) 
 
   let active = 0;
   let maximumActive = 0;
-  const releases = [];
+  let releaseOwner;
+  const holdOwner = new Promise((resolve) => { releaseOwner = resolve; });
   const attempts = Array.from({ length: 48 }, () => lock.withExclusive(async () => {
     active++;
     maximumActive = Math.max(maximumActive, active);
-    await new Promise((resolve) => releases.push(resolve));
-    active--;
+    try { await holdOwner; } finally { active--; }
   }).catch(() => undefined));
 
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  const deadline = Date.now() + 5_000;
+  while (active === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  try {
+    assert.equal(maximumActive, 1);
+    assert.equal(active, 1);
+  } finally {
+    releaseOwner();
+    await Promise.all(attempts);
+  }
   assert.equal(maximumActive, 1);
-  assert.equal(active, 1);
-  for (const release of releases) release();
-  await Promise.all(attempts);
 });
 test('release lock preserves a stale lock claimed by another recovery', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'brc-release-recovery-claim-'));
