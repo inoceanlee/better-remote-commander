@@ -141,6 +141,7 @@ async function main() {
   const env = { ...process.env, BRC_TRAEFIK_TEST_BINARY: traefik, BRC_PACKAGE_TARBALL: archive, BRC_PACKAGE_UPDATED_TARBALL: nextArchive };
   await progress.step(2, 5, '完整单测与隔离安装', async () => {
     await command('pnpm', ['test:unit'], { env });
+    await command('pnpm', ['test:package'], { env });
   });
   await progress.step(3, 5, 'Traefik、OAuth 与 MCP E2E', async () => {
     await command('pnpm', ['test:e2e'], { env });

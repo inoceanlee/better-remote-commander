@@ -23,13 +23,21 @@ async function runStage(name, argumentsList, env) {
   if (exitCode !== 0) throw new Error(name + ' failed with exit code ' + exitCode);
 }
 try {
-  await runStage('Build release and upgrade archives', [
-    path.join(root, 'scripts', 'pack-brc.mjs'), output, '--with-next-patch',
-  ], process.env);
-  const manifest = JSON.parse(await readFile(path.join(root, 'packages', 'cli', 'package.json'), 'utf8'));
-  const [major, minor, patch] = manifest.version.split('.').map(Number);
-  const tarball = path.join(output, 'inoceanlee-brc-' + manifest.version + '.tgz');
-  const updated = path.join(output, 'next-patch', 'inoceanlee-brc-' + major + '.' + minor + '.' + (patch + 1) + '.tgz');
+  if (process.platform === 'win32' && !process.env.BRC_TRAEFIK_TEST_BINARY) {
+    throw new Error('Set BRC_TRAEFIK_TEST_BINARY to the official Traefik executable before package verification.');
+  }
+  let tarball = process.env.BRC_PACKAGE_TARBALL;
+  let updated = process.env.BRC_PACKAGE_UPDATED_TARBALL;
+  if (!tarball) {
+    await runStage('Build release and upgrade archives', [
+      path.join(root, 'scripts', 'pack-brc.mjs'), output, '--with-next-patch',
+    ], process.env);
+    const manifest = JSON.parse(await readFile(path.join(root, 'packages', 'cli', 'package.json'), 'utf8'));
+    const [major, minor, patch] = manifest.version.split('.').map(Number);
+    tarball = path.join(output, 'inoceanlee-brc-' + manifest.version + '.tgz');
+    updated = path.join(output, 'next-patch', 'inoceanlee-brc-' + major + '.' + minor + '.' + (patch + 1) + '.tgz');
+  }
+  if (!updated) throw new Error('BRC_PACKAGE_UPDATED_TARBALL is required when verifying a prebuilt package.');
   await Promise.all([stat(tarball), stat(updated)]);
   await runStage('Verify package contents, install, update and uninstall', [
     '--test', path.join(root, 'tests', 'brc-package.test.mjs'),

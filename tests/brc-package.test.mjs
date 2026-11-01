@@ -159,10 +159,7 @@ async function makePackageFixture(t) {
   throw new Error('Package archives are missing. Run pnpm test:package to build and verify both archives.');
 }
 
-test('single package tarball is complete, self-contained, and globally installable', {
-  timeout: 180_000,
-  skip: !process.env.BRC_PACKAGE_TARBALL && 'Run pnpm test:package to generate and verify release archives.',
-}, async (t) => {
+test('single package tarball is complete, self-contained, and globally installable', { timeout: 180_000 }, async (t) => {
   const { root, tarball, updatedTarball } = await makePackageFixture(t);
   for (const file of [tarball, updatedTarball]) {
     const handle = await open(file, 'r');
