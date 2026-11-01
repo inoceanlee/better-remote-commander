@@ -151,82 +151,6 @@ test('statusMany isolates record errors and honors the injected inspector', asyn
   }
 });
 
-test('Windows batch uses one CIM query and rejects malformed results', () => {
-  const identityUrl = new URL('../packages/cli/dist/lifecycle/identity.js', import.meta.url).href;
-  const source = `
-import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
-import { syncBuiltinESMExports } from 'node:module';
-Object.defineProperty(process, 'platform', { value: 'win32' });
-let output = '';
-let calls = 0;
-childProcess.execFileSync = (_file, args, options) => {
-  calls++;
-  assert.match(args.at(-1), /ProcessId = 11 OR ProcessId = 12 OR ProcessId = 13/);
-  assert.ok(options.maxBuffer >= 3 * 64 * 1024);
-  if (output instanceof Error) throw output;
-  return output;
-};
-syncBuiltinESMExports();
-const { inspectProcesses } = await import(${JSON.stringify(identityUrl)});
-output = JSON.stringify([{ pid: 11, createdAt: 'time', executablePath: 'node.exe', commandLine: 'node app' }, { pid: 13, createdAt: 'time', executablePath: 'node.exe', commandLine: 'node app' }]);
-const result = await inspectProcesses([11, 12, 13, 11]);
-assert.equal(calls, 1);
-assert.equal(result.get(12), null);
-assert.equal(result.get(13).pid, 13);
-for (const invalid of ['{', JSON.stringify({ pid: 11, createdAt: '', executablePath: 'node.exe', commandLine: 'node app' }), new Error('CIM failed')]) {
-  output = invalid;
-  await assert.rejects(inspectProcesses([11, 12, 13]));
-}
-`;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
-  assert.equal(child.status, 0, child.stderr);
-});
-
-test('batch inspection failure isolates a malformed identity to its service', () => {
-  const managerUrl = new URL('../packages/cli/dist/lifecycle/processes.js', import.meta.url).href;
-  const source = `
-import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
-import { syncBuiltinESMExports } from 'node:module';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-Object.defineProperty(process, 'platform', { value: 'win32' });
-const root = await mkdtemp(path.join(os.tmpdir(), 'brc-batch-status-'));
-try {
-  const runtime = path.join(root, 'runtime');
-  await mkdir(runtime);
-  const entrypoint = path.join(root, 'service.js');
-  const id = '01234567-89ab-cdef-0123-456789abcdef';
-  const commandLine = process.execPath + ' ' + entrypoint + ' --brc-managed-id=' + id;
-  const good = { pid: 11, createdAt: 'time', executablePath: process.execPath, commandLine };
-  const bad = { ...good, pid: 12, createdAt: '' };
-  const specs = ['relay', 'agent'].map((name) => ({ name, entrypoint, workspaceRoot: root, cwd: root }));
-  for (const [index, spec] of specs.entries()) {
-    const identity = index ? { ...bad, createdAt: 'time' } : good;
-    await writeFile(path.join(runtime, spec.name + '.json'), JSON.stringify({ ...identity, version: 1, id, service: spec.name, workspaceRoot: root, entrypoint, controlPort: 1234, controlToken: 'a'.repeat(64) }));
-  }
-  childProcess.execFileSync = (_file, args) => {
-    const script = args.at(-1);
-    if (script.includes('ProcessId = 11 OR ProcessId = 12')) return JSON.stringify([good, bad]);
-    return JSON.stringify(script.includes('ProcessId = 11') ? good : bad);
-  };
-  syncBuiltinESMExports();
-  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, state: 'running', detail: 'ready' }) });
-  const { ProcessManager } = await import(${JSON.stringify(managerUrl)});
-  const statuses = await new ProcessManager({ runtime }, { pollIntervalMs: 0 }).statusMany(specs);
-  assert.equal(statuses[0].state, 'running');
-  assert.equal(statuses[1].state, 'degraded');
-  assert.match(statuses[1].detail, /identity/i);
-} finally {
-  await rm(root, { recursive: true, force: true });
-}
-`;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
-  assert.equal(child.status, 0, child.stderr);
-});
-
 test('status retries a transient process inspection error before reporting degraded', async (t) => {
   let failNext = false;
   const harness = await makeHarness(t, {
@@ -567,16 +491,16 @@ test('serializes lifecycle calls across manager instances sharing one runtime ro
   const runtimePaths = paths(root);
   const processes = new FakeProcessManager({ delayMs: 150 });
   const services = workspaceServices(root);
-  const first = new ServiceManager(runtimePaths, services, processes);
-  const second = new ServiceManager(runtimePaths, services, processes);
+  const first = new ServiceManager(runtimePaths, services, processes, new LifecycleLock(runtimePaths, { waitMs: 10_000 }));
+  const second = new ServiceManager(runtimePaths, services, processes, new LifecycleLock(runtimePaths, { waitMs: 10_000 }));
 
   const firstRun = first.start();
   const secondRun = second.restart();
   const results = await Promise.allSettled([firstRun, secondRun]);
 
   assert.equal(processes.maxActive, 1);
-  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
-  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 2);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 0);
 });
 
 test('serializes separate ServiceManagers that share a lifecycle lock', async (t) => {

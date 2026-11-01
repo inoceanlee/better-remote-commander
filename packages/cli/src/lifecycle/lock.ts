@@ -1,21 +1,32 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
-import path from 'node:path';
-import { inspectProcess } from './processes.js';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { BrcPaths } from '../config/paths.js';
+import { DEFAULT_SETTINGS } from '../config/settings.js';
+import { inspectProcess } from './identity.js';
+import { LockStore, type LockOwner } from './lock-store.js';
 
-function errorCode(error: unknown): string | undefined {
-  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
-    ? error.code
-    : undefined;
-}
+export interface LockWaitOptions { waitMs?: number; pollMs?: number }
 
 export class LifecycleLock {
   private queue: Promise<void> = Promise.resolve();
   private readonly context = new AsyncLocalStorage<LifecycleLock>();
+  private readonly store: LockStore;
+  private readonly paths: BrcPaths;
+  private waitMs: number;
+  private pollMs: number;
 
-  constructor(private readonly paths: BrcPaths) {}
+  constructor(paths: BrcPaths, options: LockWaitOptions = {}) {
+    this.paths = paths;
+    this.store = new LockStore(paths);
+    this.waitMs = options.waitMs ?? DEFAULT_SETTINGS.runtime.lockWaitMs;
+    this.pollMs = options.pollMs ?? DEFAULT_SETTINGS.runtime.lockPollMs;
+  }
+
+  updateWaitSettings(options: LockWaitOptions): void {
+    this.waitMs = options.waitMs ?? this.waitMs;
+    this.pollMs = options.pollMs ?? this.pollMs;
+  }
 
   runExclusive<T>(operation: () => Promise<T>): Promise<T> {
     if (this.context.getStore() === this) {
@@ -27,72 +38,25 @@ export class LifecycleLock {
   }
 
   private async execute<T>(operation: () => Promise<T>): Promise<T> {
-    await mkdir(this.paths.runtime, { recursive: true });
     const identity = await inspectProcess(process.pid);
     if (!identity) throw new Error('Cannot verify the CLI process identity for lifecycle locking.');
-
-    const filename = path.join(this.paths.runtime, 'lifecycle.lock');
-    const id = randomUUID();
-    let handle: FileHandle;
-    try {
-      handle = await open(filename, 'wx', 0o600);
-    } catch (error) {
-      if (errorCode(error) === 'EEXIST') throw new Error('Another BRC lifecycle operation is in progress.');
-      throw error;
+    const owner: LockOwner = { version: 1, ...identity, workspaceRoot: this.paths.root, token: randomUUID() };
+    const started = Date.now();
+    while (!await this.store.acquire(owner)) {
+      try {
+        if (await this.store.reclaimExpired(inspectProcess)) continue;
+      } catch (error) {
+        throw new Error('Lifecycle lock cannot be safely reclaimed.', { cause: error });
+      }
+      if (Date.now() - started >= this.waitMs) throw new Error('Another BRC lifecycle operation is in progress.');
+      await sleep(this.pollMs);
     }
-
-    const identityOnDisk = await handle.stat();
-    let recordWritten = false;
     try {
-      await handle.writeFile(`${JSON.stringify({ version: 1, ...identity, workspaceRoot: this.paths.root, id })}\n`, 'utf8');
-      recordWritten = true;
       return await this.context.run(this, operation);
     } finally {
-      try {
-        await handle.close();
-      } finally {
-        await this.releaseIfOwned(filename, id, identityOnDisk, recordWritten);
-      }
+      await this.store.releaseIfOwned(owner.token);
     }
   }
 
-  private async releaseIfOwned(
-    filename: string,
-    id: string,
-    identityOnDisk: Awaited<ReturnType<FileHandle['stat']>>,
-    recordWritten: boolean,
-  ): Promise<void> {
-    if (recordWritten) {
-      let contents: string;
-      try {
-        contents = await readFile(filename, 'utf8');
-      } catch (error) {
-        if (errorCode(error) === 'ENOENT') return;
-        throw error;
-      }
 
-      let record: unknown;
-      try {
-        record = JSON.parse(contents) as unknown;
-      } catch {
-        return;
-      }
-      if (!record || typeof record !== 'object' || Array.isArray(record) || !('id' in record) || record.id !== id) return;
-    } else {
-      let current;
-      try {
-        current = await stat(filename);
-      } catch (error) {
-        if (errorCode(error) === 'ENOENT') return;
-        throw error;
-      }
-      if (current.dev !== identityOnDisk.dev || current.ino !== identityOnDisk.ino) return;
-    }
-
-    try {
-      await unlink(filename);
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error;
-    }
-  }
 }
