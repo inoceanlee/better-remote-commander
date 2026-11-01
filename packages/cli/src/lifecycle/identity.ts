@@ -41,7 +41,7 @@ export async function inspectProcesses(pids: readonly number[]): Promise<Map<num
     const filter = unique.map((pid) => `ProcessId = ${pid}`).join(' OR ');
     const script = `$ErrorActionPreference = 'Stop'; Get-CimInstance -ClassName Win32_Process -Filter '${filter}' | Select-Object @{Name='pid';Expression={$_.ProcessId}},@{Name='createdAt';Expression={if ($null -ne $_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}},@{Name='executablePath';Expression={$_.ExecutablePath}},@{Name='commandLine';Expression={$_.CommandLine}} | ConvertTo-Json -Compress`;
     const output = execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8', timeout: 5_000, windowsHide: true, maxBuffer: 64 * 1024,
+      encoding: 'utf8', timeout: 5_000, windowsHide: true, maxBuffer: Math.min(unique.length * 64 * 1024, 64 * 1024 * 1024),
     }).trim();
     if (!output) return result;
     const parsed: unknown = JSON.parse(output);

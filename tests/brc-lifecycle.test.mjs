@@ -128,13 +128,16 @@ test('statusMany isolates record errors and honors the injected inspector', asyn
   await harness.manager.start(harness.spec);
   const agent = service('agent', harness.entrypoint, harness.root);
   await writeFile(path.join(harness.paths.runtime, 'agent.json'), '{');
-  mismatch = true;
-  const statuses = await harness.manager.statusMany([harness.spec, agent]);
-  assert.equal(statuses[0].state, 'degraded');
-  assert.match(statuses[0].detail, /identity/i);
-  assert.equal(statuses[1].state, 'degraded');
-  await assert.rejects(harness.manager.stop(harness.spec), /identity/i);
-  mismatch = false;
+  try {
+    mismatch = true;
+    const statuses = await harness.manager.statusMany([harness.spec, agent]);
+    assert.equal(statuses[0].state, 'degraded');
+    assert.match(statuses[0].detail, /identity/i);
+    assert.equal(statuses[1].state, 'degraded');
+    await assert.rejects(harness.manager.stop(harness.spec), /identity/i);
+  } finally {
+    mismatch = false;
+  }
 });
 
 test('Windows batch uses one CIM query and rejects malformed results', () => {
@@ -146,9 +149,10 @@ import { syncBuiltinESMExports } from 'node:module';
 Object.defineProperty(process, 'platform', { value: 'win32' });
 let output = '';
 let calls = 0;
-childProcess.execFileSync = (_file, args) => {
+childProcess.execFileSync = (_file, args, options) => {
   calls++;
   assert.match(args.at(-1), /ProcessId = 11 OR ProcessId = 12 OR ProcessId = 13/);
+  assert.ok(options.maxBuffer >= 3 * 64 * 1024);
   if (output instanceof Error) throw output;
   return output;
 };
@@ -162,6 +166,50 @@ assert.equal(result.get(13).pid, 13);
 for (const invalid of ['{', JSON.stringify({ pid: 11, createdAt: '', executablePath: 'node.exe', commandLine: 'node app' }), new Error('CIM failed')]) {
   output = invalid;
   await assert.rejects(inspectProcesses([11, 12, 13]));
+}
+`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
+  assert.equal(child.status, 0, child.stderr);
+});
+
+test('batch inspection failure isolates a malformed identity to its service', () => {
+  const managerUrl = new URL('../packages/cli/dist/lifecycle/processes.js', import.meta.url).href;
+  const source = `
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+Object.defineProperty(process, 'platform', { value: 'win32' });
+const root = await mkdtemp(path.join(os.tmpdir(), 'brc-batch-status-'));
+try {
+  const runtime = path.join(root, 'runtime');
+  await mkdir(runtime);
+  const entrypoint = path.join(root, 'service.js');
+  const id = '01234567-89ab-cdef-0123-456789abcdef';
+  const commandLine = process.execPath + ' ' + entrypoint + ' --brc-managed-id=' + id;
+  const good = { pid: 11, createdAt: 'time', executablePath: process.execPath, commandLine };
+  const bad = { ...good, pid: 12, createdAt: '' };
+  const specs = ['relay', 'agent'].map((name) => ({ name, entrypoint, workspaceRoot: root, cwd: root }));
+  for (const [index, spec] of specs.entries()) {
+    const identity = index ? { ...bad, createdAt: 'time' } : good;
+    await writeFile(path.join(runtime, spec.name + '.json'), JSON.stringify({ ...identity, version: 1, id, service: spec.name, workspaceRoot: root, entrypoint, controlPort: 1234, controlToken: 'a'.repeat(64) }));
+  }
+  childProcess.execFileSync = (_file, args) => {
+    const script = args.at(-1);
+    if (script.includes('ProcessId = 11 OR ProcessId = 12')) return JSON.stringify([good, bad]);
+    return JSON.stringify(script.includes('ProcessId = 11') ? good : bad);
+  };
+  syncBuiltinESMExports();
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, state: 'running', detail: 'ready' }) });
+  const { ProcessManager } = await import(${JSON.stringify(managerUrl)});
+  const statuses = await new ProcessManager({ runtime }, { pollIntervalMs: 0 }).statusMany(specs);
+  assert.equal(statuses[0].state, 'running');
+  assert.equal(statuses[1].state, 'degraded');
+  assert.match(statuses[1].detail, /identity/i);
+} finally {
+  await rm(root, { recursive: true, force: true });
 }
 `;
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
@@ -651,4 +699,27 @@ test('force-stops only identity-matched process after controlled shutdown times 
   assert.equal(neighborStatus.pid, neighborRecord.pid);
   assert.equal(neighborStatus.state, 'running');
   await harness.manager.stop(neighbor);
+});
+
+test('refuses forced termination when the PID identity changes after shutdown', async (t) => {
+  let stopInspections = 0;
+  let stopping = false;
+  const harness = await makeHarness(t, {
+    mode: 'hang',
+    shutdownTimeoutMs: 0,
+    processOptions: { inspectProcess: async (pid) => {
+      const identity = await inspectProcess(pid);
+      if (stopping && ++stopInspections >= 2 && identity) return { ...identity, createdAt: 'reused' };
+      return identity;
+    }},
+  });
+  await harness.manager.start(harness.spec);
+  try {
+    stopping = true;
+    await assert.rejects(harness.manager.stop(harness.spec), /identity changed before forced stop/i);
+    stopping = false;
+    assert.equal((await harness.manager.status(harness.spec)).state, 'running');
+  } finally {
+    stopping = false;
+  }
 });

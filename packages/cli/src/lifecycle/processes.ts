@@ -343,10 +343,10 @@ export class ProcessManager {
         }
       }
     }
+    if (inspectionError !== undefined) return Promise.all(specs.map((spec) => this.status(spec)));
     return Promise.all(entries.map(async ({ spec, record, status }): Promise<ServiceStatus> => {
       if (status) return status;
       if (!record) throw new Error('Missing process record.');
-      if (inspectionError !== undefined) return { name: spec.name, state: 'degraded', pid: record.pid, detail: `Cannot verify process identity: ${processErrorMessage(inspectionError)}` };
       const identity = identities.get(record.pid);
       if (!identity) return { name: spec.name, state: 'stopped', pid: null, detail: 'Recorded process has exited.' };
       if (!sameIdentity(record, identity, spec)) return { name: spec.name, state: 'degraded', pid: record.pid, detail: 'Process identity changed; refusing process control.' };
