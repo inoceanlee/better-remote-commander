@@ -14,9 +14,13 @@ export const RELEASE_CONFIG = Object.freeze({
   registryAttempts: 6,
   registryPollMs: 2000,
   keepValidatedArtifacts: 3,
-  stagePrunePatterns: Object.freeze([
-    /\.ts\.buildinfo$/i,
-    /(^|\/)(?:test|tests|__tests__|example|examples|benchmark|benchmarks)(?:\/|$)/i,
-    /\.(?:map|ts|md)$/i,
-  ]),
+  stagePruneRules: Object.freeze({
+    sourceMaps: /\.map$/i,
+    typescript: /\.(?:d\.ts|ts)$/i,
+    testDirectories: /(^|\/)(?:test|tests|__tests__)(?:\/|$)/i,
+    exampleDirectories: /(^|\/)(?:example|examples|benchmark|benchmarks)(?:\/|$)/i,
+    documentationDirectories: /(^|\/)docs?(?:\/|$)/i,
+    documentationFiles: /^(?:readme|changelog|history|contributing|code_of_conduct|authors|contributors|security)\.(?:md|txt|html)$/i,
+    runtimeAssets: /\.(?:pdf|docx?|xlsx?|pptx?|odt|ods|odp|png|jpe?g|gif|webp|avif|bmp|tiff?|ico|svg|heic|md)$/i,
+  }),
 });

@@ -7,6 +7,8 @@ import { createGunzip, createGzip } from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installLockedRuntimeDependencies } from './release-dependencies.mjs';
+import { pruneStagedDependencies } from './release-prune.mjs';
 
 const workspaceRoot = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.resolve(process.argv[2] ?? path.join(workspaceRoot, 'dist-pack'));
@@ -171,8 +173,11 @@ try {
   await writeFile(path.join(stageDir, 'package.json'), `${JSON.stringify(packageManifest, null, 2)}\n`);
 
   await mkdir(outputDir, { recursive: true });
-  process.stdout.write('BRC_DETAIL:隔离安装运行依赖\n');
-  await runPnpm(['install', '--prod', '--ignore-scripts', '--no-frozen-lockfile'], stageDir);
+  process.stdout.write('BRC_DETAIL:依照锁文件隔离安装运行依赖\n');
+  await installLockedRuntimeDependencies({ workspaceRoot, stageDir, workDir, sourcePackages, runPnpm });
+  process.stdout.write('BRC_DETAIL:精简暂存目录内的非运行时文件\n');
+  const pruning = await pruneStagedDependencies(stageDir);
+  process.stdout.write(`BRC_DETAIL:精简 ${pruning.filesRemoved} 个文件，${pruning.bytesRemoved} 字节；分类 ${JSON.stringify(pruning.byCategory)}\n`);
 
   const bundledSharedPath = path.join(stageDir, 'node_modules', 'brc-shared');
   await rm(bundledSharedPath, { recursive: true, force: true });
