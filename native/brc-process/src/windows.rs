@@ -94,8 +94,10 @@ unsafe fn read_variant_text(object: *mut IWbemClassObject, field: &str) -> Resul
     let kind = *(ptr::addr_of!(variant) as *const u16);
     let result = if kind == 8 {
         let pointer = *((&variant as *const VARIANT as *const u8).add(8) as *const *mut u16);
-        let length = SysStringLen(pointer) as usize;
-        Some(String::from_utf16_lossy(slice::from_raw_parts(pointer, length)))
+        if pointer.is_null() { None } else {
+            let length = SysStringLen(pointer) as usize;
+            Some(String::from_utf16_lossy(slice::from_raw_parts(pointer, length)))
+        }
     } else if kind == 1 || kind == 0 {
         None
     } else { VariantClear(&mut variant); return Err("WMI_PROPERTY_TYPE"); };
