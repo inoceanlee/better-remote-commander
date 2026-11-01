@@ -91,6 +91,32 @@ async function directoryBytes(directory) {
   return bytes;
 }
 
+test('cleanup bypasses the lifecycle lock when only fresh logs and active versions exist', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const currentVersion = path.join(brcPaths.traefik, 'versions', '3.7.16');
+  await mkdir(currentVersion, { recursive: true });
+  await writeFile(path.join(currentVersion, 'traefik.exe'), 'current version');
+  await writeFile(path.join(brcPaths.traefik, 'versions.json'), JSON.stringify({
+    version: 1, current: '3.7.16', previous: null,
+  }));
+  const freshLog = path.join(brcPaths.logs, 'relay.log');
+  await writeFile(freshLog, 'recent log');
+  const original = LifecycleLock.prototype.runExclusive;
+  let lockCalls = 0;
+  LifecycleLock.prototype.runExclusive = async function (...args) {
+    lockCalls++;
+    return original.apply(this, args);
+  };
+  let report;
+  try { report = await cleanRuntime(brcPaths); }
+  finally { LifecycleLock.prototype.runExclusive = original; }
+  assert.equal(lockCalls, 0);
+  assert.equal(report.removed, 0);
+  assert.equal(report.failures.length, 0);
+  assert.equal(await exists(freshLog), true);
+  assert.equal(await exists(currentVersion), true);
+});
+
 test('cleans expired logs when the runtime directory does not exist', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   await rm(brcPaths.runtime, { recursive: true });

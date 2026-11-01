@@ -500,7 +500,9 @@ async function cleanTraefikVersions(paths: BrcPaths, runtimes: Map<ManagedServic
   }
 }
 
-async function hasProtectedCleanupCandidates(paths: BrcPaths, report: CleanupReport): Promise<boolean> {
+async function hasProtectedCleanupCandidates(
+  paths: BrcPaths, report: CleanupReport, cutoff: number, maxTotalBytes: number,
+): Promise<boolean> {
   if (await safeDirectory(paths.root, paths.runtime, report)) {
     try {
       const entries = await readdir(paths.runtime);
@@ -511,11 +513,25 @@ async function hasProtectedCleanupCandidates(paths: BrcPaths, report: CleanupRep
       return true;
     }
   }
-  if ((await collectLogs(paths, report)).length > 0) return true;
+  const logs = await collectLogs(paths, report);
+  const totalLogBytes = logs.reduce((total, file) => total + file.size, 0);
+  if (logs.some((file) => file.modifiedAt <= cutoff) || totalLogBytes > maxTotalBytes) return true;
+
   const versionsPath = path.join(paths.traefik, 'versions');
   if (!await safeDirectory(paths.root, versionsPath, report)) return false;
   try {
-    return (await readdir(versionsPath)).length > 0;
+    const versions = await readdir(versionsPath);
+    if (versions.length === 0) return false;
+    let manifest: VersionManifest;
+    try {
+      const value = JSON.parse((await readRegularFile(path.join(paths.traefik, 'versions.json'))).contents) as Record<string, unknown>;
+      if (value.version !== 1 || !validVersion(value.current)
+          || !(value.previous === null || validVersion(value.previous))) return true;
+      manifest = { version: 1, current: value.current, previous: value.previous };
+    } catch {
+      return true;
+    }
+    return versions.some((version) => version !== manifest.current && version !== manifest.previous);
   } catch (error) {
     issue(report.failures, versionsPath, error instanceof Error ? error.message : String(error));
     return true;
@@ -566,7 +582,7 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
   if (!await safeDirectory(paths.root, paths.runtime, report)) return report;
 
   await cleanLifecycleLock(paths, report, dryRun);
-  if (!await hasProtectedCleanupCandidates(paths, report)) return report;
+  if (!await hasProtectedCleanupCandidates(paths, report, cutoff, settings.logs.maxTotalMiB * 1024 * 1024)) return report;
 
   try {
     await new LifecycleLock(paths, { waitMs: settings.runtime.lockWaitMs, pollMs: settings.runtime.lockPollMs }).runExclusive(async () => {
