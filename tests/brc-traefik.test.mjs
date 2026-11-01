@@ -315,7 +315,7 @@ test('setup reports operation stages and download failures without changing the 
   assert.ok(events.some((event) => event.operation === 'setup' && event.stage === 'stage' && event.status === 'completed'));
   release.setVersion('3.7.17', { checksum: '0'.repeat(64) });
   await assert.rejects(manager.update(), /checksum/i);
-  assert.ok(events.some((event) => event.operation === 'update' && event.stage === 'stage' && event.status === 'failed'));
+  assert.ok(events.some((event) => event.operation === 'update' && event.stage === 'verify' && event.status === 'failed'));
 });
 
 test('missing deployment templates leave the installed version and both configurations unchanged', async (t) => {
@@ -986,4 +986,24 @@ test('configuration and rollback emit their own phase events', async (t) => {
   for (const [operation, stage] of [['config', 'config'], ['update', 'activate'], ['rollback', 'verify'], ['rollback', 'health'], ['rollback', 'activate']]) {
     assert.ok(events.some((event) => event.operation === operation && event.stage === stage && event.status === 'completed'));
   }
+});
+
+test('asynchronous progress output failure preserves checksum failure and staging cleanup', async (t) => {
+  const { Writable } = await import('node:stream');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const { paths: brcPaths } = await makeRoot(t);
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback(Object.assign(new Error('closed output'), { code: 'EPIPE' }));
+    },
+  });
+  output.isTTY = true;
+  const progress = new TraefikProgress(output);
+  const release = makeRelease('3.7.16', { checksum: '0'.repeat(64) });
+  await assert.rejects(makeManager(brcPaths, release, { reporter: (event) => progress.report(event) }).setup(), /checksum/i);
+  await new Promise((resolve) => setImmediate(resolve));
+  progress.stop();
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(path.join(brcPaths.traefik, 'versions')), []);
+  assert.deepEqual(await readdir(brcPaths.tmp), []);
 });

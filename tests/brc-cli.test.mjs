@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -318,6 +318,7 @@ test('Traefik progress renders real byte percentages and stops on completion', a
   progress.report({ operation: 'setup', stage: 'download', status: 'started' });
   progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 50, totalBytes: 100 });
   progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 20, totalBytes: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 180));
   progress.report({ operation: 'setup', stage: 'download', status: 'completed', completedBytes: 100, totalBytes: 100 });
   const text = output.text;
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -357,4 +358,58 @@ test('interrupt cleanup stops an active progress animation', async () => {
   const text = output.text;
   await new Promise((resolve) => setTimeout(resolve, 180));
   assert.equal(output.text, text);
+});
+
+test('byte updates do not redraw until the animation timer fires', async () => {
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const output = { isTTY: true, text: '', write(value) { this.text += value; } };
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  const initial = output.text;
+  for (let i = 1; i < 1000; i++) {
+    progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: i, totalBytes: 1000 });
+  }
+  assert.equal(output.text, initial);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.match(output.text, /99%/);
+  progress.stop();
+});
+
+test('SIGINT clears a live progress line and preserves interrupt exit semantics', { skip: process.platform === 'win32', timeout: 5000 }, async () => {
+  const progressUrl = JSON.stringify(new URL('../packages/cli/dist/progress.js', import.meta.url).href);
+  const source = `import { TraefikProgress, installProgressInterruptHandler } from ${progressUrl};
+    const output = { isTTY: true, write: (text) => process.stdout.write(text) };
+    const progress = new TraefikProgress(output);
+    installProgressInterruptHandler(progress);
+    progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+    process.stdout.write('READY\\n');
+    setInterval(() => {}, 1000);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const ended = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', (code, signal) => resolve({ code, signal }));
+  });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (stdout.includes('READY\n') && !child.killed) child.kill('SIGINT');
+  });
+  const result = await ended;
+  assert.ok(result.signal === 'SIGINT' || (process.platform === 'win32' && result.code !== 0), stderr);
+  assert.match(stdout, /READY\n[\s\S]*\r\x1b\[2K/);
+});
+
+test('asynchronous progress stream errors do not change command outcome', async () => {
+  const progressUrl = JSON.stringify(new URL('../packages/cli/dist/progress.js', import.meta.url).href);
+  const source = `import { Writable } from 'node:stream';
+    import { TraefikProgress } from ${progressUrl};
+    const output = new Writable({ write(_chunk, _encoding, callback) { callback(Object.assign(new Error('closed'), { code: 'EPIPE' })); } });
+    output.isTTY = true;
+    const progress = new TraefikProgress(output);
+    progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+    setTimeout(() => { progress.stop(); process.exitCode = 7; }, 30);`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
+  assert.equal(result.status, 7, result.stderr);
 });

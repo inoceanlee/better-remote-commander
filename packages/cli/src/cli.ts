@@ -16,7 +16,7 @@ import { createMaintenanceCommands } from './commands/maintenance.js';
 import { TraefikManager } from './traefik/manager.js';
 import { runManagedTraefikService } from './traefik/runtime.js';
 import { RelayDatabase } from './lifecycle/relay-database.js';
-import { TraefikProgress } from './progress.js';
+import { installProgressInterruptHandler, TraefikProgress } from './progress.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -358,10 +358,12 @@ async function main(): Promise<void> {
     write: (message) => console.log(message),
     writeError: (message) => console.error(message),
   };
+  const removeInterruptHandler = installProgressInterruptHandler(progress);
   try {
     process.exitCode = await runCli(process.argv.slice(2), deps);
   } finally {
     progress.stop();
+    removeInterruptHandler();
   }
 }
 
