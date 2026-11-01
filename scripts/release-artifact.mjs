@@ -132,10 +132,31 @@ export class ReleaseLock {
       if (Number.isInteger(owner.pid) && owner.pid > 0 && processIsAlive(owner.pid)) {
         throw new Error('Release lock is already held by process ' + owner.pid + '.');
       }
+
+      const recoveryFile = path.join(this.directory, 'recovery.json');
+      let recovery;
+      try {
+        recovery = await open(recoveryFile, 'wx', 0o600);
+        await recovery.writeFile(JSON.stringify({ pid: process.pid, token }) + '\n');
+      } catch (recoveryError) {
+        if (recovery) await rm(recoveryFile, { force: true });
+        if (recoveryError.code === 'EEXIST') {
+          throw new Error('Release lock recovery is already in progress.');
+        }
+        throw recoveryError;
+      } finally {
+        await recovery?.close();
+      }
+
       const stale = this.directory + '.stale-' + randomUUID();
       try {
+        const currentOwner = JSON.parse(await readFile(ownerFile, 'utf8'));
+        if (currentOwner.token !== owner.token) {
+          throw new Error('Release lock changed while checking its owner.');
+        }
         await rename(this.directory, stale);
       } catch {
+        await rm(recoveryFile, { force: true });
         throw new Error('Release lock changed while checking its owner.');
       }
       await rm(stale, { recursive: true, force: true });

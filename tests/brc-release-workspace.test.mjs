@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -76,4 +76,45 @@ test('release lock rejects concurrent owners without replacing the active lock',
   release('first');
   assert.equal(await owner, 'first');
   assert.equal(await lock.withExclusive(() => 'next'), 'next');
+});
+test('concurrent stale-lock recovery keeps one release owner active', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'brc-release-stale-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lock = new ReleaseLock(path.join(root, 'release.lock'));
+  await mkdir(lock.directory);
+  await writeFile(path.join(lock.directory, 'owner.json'), JSON.stringify({
+    pid: process.pid + 1_000_000,
+    token: 'stale-release-lock-owner',
+  }));
+
+  let active = 0;
+  let maximumActive = 0;
+  const releases = [];
+  const attempts = Array.from({ length: 48 }, () => lock.withExclusive(async () => {
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => releases.push(resolve));
+    active--;
+  }).catch(() => undefined));
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(maximumActive, 1);
+  assert.equal(active, 1);
+  for (const release of releases) release();
+  await Promise.all(attempts);
+});
+test('release lock preserves a stale lock claimed by another recovery', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'brc-release-recovery-claim-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const lock = new ReleaseLock(path.join(root, 'release.lock'));
+  await mkdir(lock.directory);
+  await writeFile(path.join(lock.directory, 'owner.json'), JSON.stringify({
+    pid: process.pid + 1_000_000,
+    token: 'stale-release-lock-owner',
+  }));
+  await writeFile(path.join(lock.directory, 'recovery.json'), '{"token":"active-recovery"}');
+
+  await assert.rejects(lock.withExclusive(() => 'must not acquire'), /recovery/i);
+  assert.equal(await readFile(path.join(lock.directory, 'recovery.json'), 'utf8'), '{"token":"active-recovery"}');
+  assert.equal(JSON.parse(await readFile(path.join(lock.directory, 'owner.json'), 'utf8')).token, 'stale-release-lock-owner');
 });
