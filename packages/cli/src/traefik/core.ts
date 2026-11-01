@@ -134,3 +134,7 @@ export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
   }
   return executable;
 }
+
+export function verifyChecksum(actual: string, expected: string): void {
+  if (actual !== expected) throw new Error('Official Traefik ZIP SHA-256 checksum does not match.');
+}

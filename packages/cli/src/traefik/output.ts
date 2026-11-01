@@ -7,7 +7,7 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { pipeline } from 'node:stream/promises';
 import unzipper from 'unzipper';
 import type { BrcPaths } from '../config/paths.js';
-import { errorCode, validateArchiveEntries, type TraefikRelease, type TraefikTemplates, type VersionManifest } from './core.js';
+import { errorCode, validateArchiveEntries, verifyChecksum, type TraefikRelease, type TraefikTemplates, type VersionManifest } from './core.js';
 
 
 export class TraefikOutput {
@@ -27,7 +27,7 @@ export class TraefikOutput {
     try {
       if (!response.body) throw new Error('Official Traefik ZIP has no response body.');
       await pipeline(Readable.fromWeb(response.body as unknown as WebReadableStream<Uint8Array>), createWriteStream(archivePath, { flags: 'wx' }));
-      if (await sha256File(archivePath) !== expectedChecksum) throw new Error('Official Traefik ZIP SHA-256 checksum does not match.');
+      verifyChecksum(await sha256File(archivePath), expectedChecksum);
       await mkdir(stage);
       await this.extractExecutable(archivePath, stage);
       return stage;
