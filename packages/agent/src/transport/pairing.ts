@@ -2,25 +2,25 @@
  * BRC agent device pairing (OAuth device-authorization style) + credential persistence.
  * Credentials: $BRC_HOME/device.json (mode 0600) -> { relayUrl, deviceId, deviceToken, name, pairedAt }
  */
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, existsSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveAgentHome } from '../core/config.js';
+import { CredentialStore, type DeviceCredentials } from './credential-store.js';
 
-export interface DeviceCredentials { relayUrl: string; deviceId: string; deviceToken: string; name: string; pairedAt: string }
+export type { DeviceCredentials } from './credential-store.js';
 
 /** Agent home. Resolved to a long path: Windows 8.3 short paths crash libuv's fs.watch (used by the config watcher). */
 export const homeDir = () => resolveAgentHome(process.env);
 const credFile = () => path.join(homeDir(), 'device.json');
+const credentialStore = () => new CredentialStore(homeDir());
 
 export function loadCredentials(): DeviceCredentials | null {
-  try { return JSON.parse(readFileSync(credFile(), 'utf8')) as DeviceCredentials; } catch { return null; }
+  return credentialStore().load();
 }
 
-export function saveCredentials(c: DeviceCredentials): void {
-  mkdirSync(homeDir(), { recursive: true });
-  writeFileSync(credFile(), JSON.stringify(c, null, 2), { mode: 0o600 });
-  try { chmodSync(credFile(), 0o600); } catch { /* windows */ }
+export function saveCredentials(credentials: DeviceCredentials): void {
+  credentialStore().save(credentials);
 }
 
 export function clearCredentials(): boolean {
@@ -68,6 +68,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Runs the pairing flow until approved, denied or expired. Returns saved credentials. */
 export async function pairDevice(opts: PairOptions): Promise<DeviceCredentials> {
+  if (loadCredentials()) throw new Error('agent already paired; clear credentials before pairing a different device');
   const base = opts.relayUrl.replace(/\/$/, '');
   const deviceId = opts.deviceId ?? randomUUID();
   const { status, json: start } = await postJson<StartResponse>(`${base}/device/start`, { client_name: opts.name });
