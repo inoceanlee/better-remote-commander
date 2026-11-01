@@ -1,21 +1,25 @@
 # Security
 
-## Model
-- The agent runs with the permissions of the user who started it. Anything that user can do, an authenticated AI client can do on that machine (within `allowedDirectories` and outside `blockedCommands`).
-- The relay never sees device tokens or user passwords in plaintext (SHA-256 / scrypt). OAuth access tokens live 1 h, refresh tokens 30 d and rotate on use.
-- Agents only make outbound connections. The relay is the only thing that needs a public endpoint.
-- Per-call audit log: tool name, args hash, device, client, result, latency. Arguments and outputs are never stored.
+## Trust boundaries
 
-## Defaults you should keep
-- `BRC_ADMIN_PASSWORD` strong; `BRC_SESSION_SECRET` random (32+ bytes)
-- `PUBLIC_URL` must be `https://` in any real deployment (HSTS + secure cookies switch on automatically)
-- Login: 5 failures per IP+user -> 5 min lock. Consent is required per OAuth client.
-- Agent: `--allow-dir` to restrict file access; pause a device from `/admin` when you do not need it
+BRC runs Agent tools with the privileges of the Windows account that starts it. An authorized remote MCP client can run terminal commands and access files within the Agent's configured restrictions. Only grant access to clients you trust.
 
-## Threat notes
-- A compromised AI client session = shell on paused-off devices only. Revoke: `/admin` -> Delete device (closes the socket, invalidates the token) or `/auth/clients` -> Delete client (revokes its tokens).
-- OAuth clients use S256 PKCE. ChatGPT and Claude register clients dynamically through the relay's OAuth metadata.
-- Quick tunnels (`trycloudflare.com`, random ngrok URLs) are for testing: the hostname changes on restart and OAuth clients registered against it become invalid.
+- The public HTTPS entry point is managed separately, for example with Tailscale Funnel.
+- Forward public traffic to the local Traefik proxy. Relay and management endpoints must remain bound to `127.0.0.1`.
+- Traefik provides rate and concurrency protection. Relay handles OAuth, device pairing, token checks and tool authorization.
+- The Agent establishes an outbound WebSocket connection and does not expose a public listener.
+- SQLite, OAuth credentials and device pairing data live in the private BRC data root. Protect this directory and keep it out of source control.
+
+## Operating guidance
+
+1. Install the unified package and initialize identity with `brc setup`.
+2. Set `services.publicUrl` to the actual HTTPS origin and verify the proxy forwards WebSocket and MCP requests.
+3. Use `brc status` and `brc logs` to inspect the three managed services.
+4. Review paired devices in Relay's dashboard. Revoke access for devices or OAuth clients that should no longer connect.
+5. Keep the public entry point, BRC package and Traefik current through their separate update processes.
+
+Treat unexpected tool activity, missing identity data and database integrity errors as security events. BRC deliberately refuses unsafe automatic identity recovery or broad process termination.
 
 ## Reporting
-Open a private issue or email the maintainer. Please include relay version (`/health`) and steps to reproduce.
+
+Report security issues privately to the repository maintainer, including the affected component, current package version and a minimal reproduction without tokens, passwords or private data. The package version is defined in `packages/cli/package.json`.

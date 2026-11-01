@@ -112,4 +112,4 @@ pnpm test
 
 Issues and pull requests are welcome in this repository. The source uses pnpm workspaces with separate CLI, Relay, Agent, and shared packages. See [architecture](https://github.com/inoceanlee/better-remote-commander/blob/main/docs/architecture.md) for implementation details.
 
-MIT license: [LICENSE](https://github.com/inoceanlee/better-remote-commander/blob/main/LICENSE). Tool attribution: [NOTICE](https://github.com/inoceanlee/better-remote-commander/blob/main/NOTICE).
+Security guidance: [SECURITY.md](SECURITY.md). MIT license: [LICENSE](LICENSE). Tool attribution: [NOTICE](NOTICE).

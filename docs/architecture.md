@@ -1,128 +1,56 @@
-# Better Remote Commander (BRC) architecture
+# BRC 架构
 
-## Components
-1. **Agent** (`packages/agent`, npm `brc-agent`) — runs on the machine to control. Tool core vendored from
-   Desktop Commander (MIT): files, terminal, processes, search, edit. Our transport: outbound WebSocket, device pairing,
-   credential persistence in `$BRC_HOME` (default `~/.brc`).
-2. **Relay** (`packages/relay`, npm `brc-relay`) — self-hosted server (Express + MCP SDK). Doors:
-   - `/mcp` — MCP Streamable HTTP, bearer-protected (Claude connector, ChatGPT remote MCP)
-   - `/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke` — OAuth 2.0/2.1-compatible flow (S256 PKCE, dynamic client registration)
-   - `/device/start|poll|verify|approve` — device pairing; `/auth/*`, `/` — browser pages
-   - `/ws` — agent socket (device token)
-3. **Shared** (`packages/shared`) — wire protocol + types used by both.
-4. **Store** — `node:sqlite` (`BRC_DB`). Postgres is a possible later addition, not required.
+## 运行形态
 
-## Flow
-Client -> relay (`/mcp`) -> OAuth bearer -> device router -> agent (WS) -> tool -> result back. Audit row per call.
+BRC 是面向 Windows x64 的单一 npm 包 `@inoceanlee/brc`。CLI 统一管理 Relay、Traefik 和 Agent。用户通过 pnpm 全局安装，使用 `brc setup` 初始化，再用 `brc start` 和 `brc stop` 管理进程。
 
-## Deployment modes (same image, config only)
-| Profile | Relay runs | Public URL | Agent link |
-|---------|-----------|------------|------------|
-| `local` | your PC, Docker | http://localhost:PORT (dev only) | ws://localhost |
-| `tunnel` + `cloudflare` / `ngrok` | your PC, Docker | Cloudflare Tunnel hostname / static ngrok domain | ws://localhost or wss://public |
-| `cloud` | VPS, Docker + Caddy | your domain, auto TLS | wss://public |
-Agents anywhere connect outbound only; several agents per relay; `deviceId` selects the target.
+公网 HTTPS 入口由用户管理，通常使用 Tailscale Funnel。入口将 HTTP、MCP 和 WebSocket 转发至 Windows 本机的 Traefik。Relay、Traefik 管理入口和 Agent 管理入口均绑定 loopback。BRC 不管理公网域名或 Funnel 生命周期。
 
-## Key config
-- `PUBLIC_URL` — drives OAuth issuer, redirect validation, pairing URLs. Must be the exact public origin.
-- `TRUST_PROXY=true` behind Caddy/ngrok/Cloudflare. `PORT`, `HOST`, `BRC_DB`, `LOG_LEVEL`
-- `BRC_ADMIN_USER` / `BRC_ADMIN_PASSWORD` (single-user v1), `BRC_SESSION_SECRET`
-- Agent: `BRC_RELAY`, `BRC_NAME`, `BRC_HOME`, `BRC_DEBUG`; `--logout`, `--no-browser`
+```text
+支持远程 MCP 的聊天客户端
+             |
+       公网 HTTPS 入口
+             |
+  Traefik (127.0.0.1)
+             |
+             v
+  Relay (HTTP/MCP/OAuth)
+             ^
+             | 出站 WebSocket
+             |
+   Agent (24 种本机工具)
+   管理端口仅限本机
+```
 
-## Relay database initialization
-Initialize a new database once with `brc-relay --initialize` or `node packages/relay/dist/cli.js --initialize`. Normal startup refuses a missing database; restore an existing database instead of creating a replacement identity. `brc setup` initializes only a new, empty BRC data root.
+## 代码结构
 
-## Agent <-> relay protocol (WebSocket, JSON frames)
-- Agent connects `wss://PUBLIC_URL/ws` with `Authorization: Bearer <device token>`
-- `hello` {deviceId, name, os, version, tools[]}  agent -> relay on connect
-- `call`  {id, tool, args}                        relay -> agent
-- `result`{id, ok, content | error}               agent -> relay
-- `ping`/`pong` every 20 s; relay marks device offline after 2 missed
-- Multiple devices per user; client picks via `deviceId` arg (as upstream)
+- `packages/cli/`：统一命令、配置校验、生命周期、代理运行及维护清理；发行版本的唯一来源是其 `package.json`。
+- `packages/relay/`：HTTP 服务、用户及设备、SQLite、OAuth、MCP、审计记录。
+- `packages/agent/`：配对和持久凭据、出站 WebSocket、文件和终端等工具。
+- `packages/shared/`：通信协议、共同类型和受管控制接口。
+- `native/brc-process/`：Windows x64 Rust 进程身份查询器。
+- `deploy/traefik/`：统一代理的静态和动态配置模板。
+- `scripts/`：构建、隔离测试、性能检查和手动 npm 发布流程。
+- `tests/`：Node 单测、生命周期安全、原生组件与发行流程回归。
 
-## Security
-- Agent never listens on a port; all connections outbound
-- Device tokens revocable from relay dashboard; refresh via OAuth
-- Blocked-commands list + allowedDirectories enforced on the agent side
-- Audit log of every call (tool, args hash, device, timestamp) in store
+## 配置与身份
 
+用户数据根默认为 `%LOCALAPPDATA%\BRC\`，可通过 `BRC_DATA_ROOT` 更改。唯一可编辑配置文件为 `config/brc.yaml`，使用 `brc config show/get/set/apply/path` 管理。默认值、类型和校验集中在 `packages/cli/src/config/settings.ts`。
 
-## Phase 1 status (done)
-- shared: wire protocol v1 (hello/welcome/call/result/ping/pong/error), DEFAULTS
-- agent: dispatcher (24 tools, ported from upstream switch), WsClient with backoff reconnect + pong watchdog, CLI (--relay --token --name --device-id --debug)
-- relay: Fastify + @fastify/websocket, DeviceHub (call/result matching, heartbeat, stale-socket replacement), /health, /ws, /debug/devices, /debug/tools, /debug/call
-- agent uses ~/.brc (BRC_HOME) - never touches Desktop Commander's ~/.claude-server-commander
-- upstream telemetry hard-off unless BRC_UPSTREAM_TELEMETRY=1
-- smoke test: read_file 8 ms, start_process 579 ms via relay; agent survives relay restart
+Relay 使用 SQLite 保存管理员、OAuth 客户端、访问令牌和设备归属。正常重启、升级和配置应用保留这些身份。数据库缺失、归属不一致或管理员异常时，拒绝危险的自动重建；新建数据库由 `brc setup` 初始化。
 
-### Run locally
-    $env:PORT=3210; $env:BRC_DEVICE_TOKEN='dev-device-token'; $env:BRC_ADMIN_TOKEN='dev-admin-token'
-    node packages/relay/dist/cli.js
-    node packages/agent/dist/cli.js --relay http://localhost:3210 --token dev-device-token --name MyPC --device-id mypc
-    curl -H "Authorization: Bearer dev-admin-token" -X POST http://localhost:3210/debug/call -H "content-type: application/json" -d '{"tool":"list_sessions","args":{}}'
+Agent 向 Relay 主动建立 WebSocket 连接，经设备配对获取凭据。ChatGPT 等客户端通过 OAuth 授权访问 `/mcp`；Relay 对工具调用执行设备选择、鉴权和审计。Traefik 的全站限流及并发限制只是入口资源保护，不替代 Relay 身份认证。
 
+## 生命周期与边界
 
-## Phase 2 status (done)
-- relay moved to Express (MCP SDK `mcpAuthRouter` is Express-native); `ws` handles the /ws upgrade
-- store: node:sqlite (`BRC_DB`, default data/relay.sqlite) - users, oauth_clients, auth_codes, tokens (hashed), devices (hashed token, paused), device_codes, audit
-- OAuth 2.0: PKCE S256, dynamic client registration, consent page, refresh rotation, revocation, `.well-known/oauth-authorization-server` + `oauth-protected-resource/mcp`
-- browser pages: /auth/login, /auth/consent, /device/verify, /device/approve, / (device list). Signed-cookie sessions (`BRC_SESSION_SECRET`)
-- device pairing: POST /device/start -> code; owner approves in browser; POST /device/poll -> device token. Agent stores it in `$BRC_HOME/device.json` (0600), re-pairs automatically on 401
-- /mcp: stateless Streamable HTTP, bearer-protected. Tools = list_devices + union of online agents' tools, each with optional `deviceId`; single online device is auto-selected; audit row per call
-- single-user v1: admin user from `BRC_ADMIN_USER` (default admin) / `BRC_ADMIN_PASSWORD` (required)
-- e2e: `node scripts/e2e-oauth.mjs <url> <user> <pass>` - 14/14 checks pass (discovery, DCR, PKCE, login, consent, token, initialize, tools/list, list_devices, start_process on device, 401 on bad token, refresh rotation)
+启动顺序：Relay、Traefik、Agent。停止顺序相反。跨进程配置应用、启停和 Traefik 切换使用统一的原子目录锁。终止进程和恢复失效锁前必须核验 PID、启动时间、命令行及可执行路径；身份不完整时拒绝危险操作。
 
-### Run locally (Phase 2)
-    $env:PORT=3210; $env:PUBLIC_URL='http://localhost:3210'; $env:BRC_ADMIN_PASSWORD='...'; $env:BRC_SESSION_SECRET='...'
-    node packages/relay/dist/cli.js --initialize  # once for a new database
-    node packages/relay/dist/cli.js
-    node packages/agent/dist/cli.js --relay http://localhost:3210 --name MyPC     # prints pairing code, opens browser
-    # Claude: Settings -> Connectors -> add  <PUBLIC_URL>/mcp  -> sign in -> Allow
+Traefik 使用单条公共路由共享限流和并发约束。服务只绑定 `127.0.0.1`。更新 Traefik 时，先下载并校验官方文件，再在生命周期锁内切换。常规清理不得删除 SQLite、凭据或来源不明的进程。
 
-## Phase 3 status (done)
-- images: packages/relay/Dockerfile (node:24-alpine, 263 MB, non-root, HEALTHCHECK) and packages/agent/Dockerfile (node:24-bookworm-slim + bash/git/curl, for Linux servers)
-- docker-compose.yml profiles: `local` (relay on 127.0.0.1:PORT), `tunnel` + `cloudflare` (cloudflared sidecar, TUNNEL_TOKEN) or `tunnel` + `ngrok` (static NGROK_DOMAIN), `cloud` (relay + Caddy auto-TLS on DOMAIN)
-- deploy/Caddyfile, .env.example, .dockerignore, scripts/tunnel-ngrok.{sh,ps1} for a quick random-URL dev tunnel
-- verified: local profile 14/14 e2e; device tokens persist in `relay-data` volume across `compose down/up`; Windows host agent + Linux container agent on one relay; multi-device routing (`scripts/e2e-multidevice.mjs`)
-- compose gotcha: profile-specific `${VAR:?}` breaks every profile (compose interpolates all services) -> use `${VAR:-}` defaults
+## 构建、测试和发布
 
-### Deploy cheat sheet
-    cp .env.example .env   # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
-    # Initialize an empty volume once; use relay for local/tunnel or relay-cloud for cloud.
-    docker compose --profile local run --rm --entrypoint node relay dist/cli.js --initialize
-    # docker compose --profile cloud run --rm --entrypoint node relay-cloud dist/cli.js --initialize
-    # Start one profile.
-    docker compose --profile local up -d                            # http://localhost:3000
-    # docker compose --profile tunnel --profile cloudflare up -d      # + CLOUDFLARE_TUNNEL_TOKEN, PUBLIC_URL=https://rdp.yourdomain
-    # docker compose --profile tunnel --profile ngrok up -d           # + NGROK_AUTHTOKEN, NGROK_DOMAIN, PUBLIC_URL=https://<domain>
-    # docker compose --profile cloud up -d                            # VPS: DOMAIN=..., PUBLIC_URL=https://DOMAIN
-    docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://... -e BRC_NAME=srv brc/agent
+开发需要 Node.js 22.13+、pnpm；Windows 原生构建还需要 Rust MSVC 工具链。根目录的 `pnpm build` 构建四个工作区包和 Windows 原生进程查询器。
 
-## Phase 4 status (done)
-- ChatGPT remote MCP and Claude use the same `/mcp` endpoint and OAuth Dynamic Client Registration flow.
-- OAuth metadata is published at both protected-resource discovery paths and advertises S256 PKCE, authorization-code + refresh-token grants, and DCR.
-- Authorization responses include RFC 9207 `iss`; access and refresh-token exchanges preserve and validate the requested MCP `resource`.
-- `/auth/clients` is an inspection/revocation page for automatically registered clients; there is no manual callback URL or redirect override.
-- `mcp/invoke.ts` handles device resolution, pause checks, and audit for MCP tool calls.
-- e2e: `node scripts/e2e-oauth.mjs <url> <user> <pass>` validates discovery, DCR, PKCE, consent, token refresh, and MCP calls.
+验证入口为 `pnpm test:unit`、`pnpm test:e2e` 和 `pnpm test:package`。E2E 在独立临时数据库、凭据与随机 loopback 端口运行；设置 `BRC_TRAEFIK_TEST_BINARY` 可将官方 Traefik 纳入 E2E。测试不得影响当前运行的 BRC。
 
-## Phase 5 status (done) - v1.0
-- /admin dashboard: devices (rename / pause / resume / delete = revoke token + disconnect), call stats, last 100 audit rows
-- pause enforced on MCP tool calls; delete closes the live socket with 4401
-- OAuth clients are created through DCR and can be reviewed/revoked from `/auth/clients`
-- login rate limit: 5 failures per IP+username -> 5 min lock (429)
-- agent `--install-service` / `--uninstall-service`: Windows Task Scheduler (ONLOGON, hidden via .cmd + wscript, log ~/.brc/agent.log), Linux systemd --user unit, macOS LaunchAgent. Pair first, then install
-- agent `--allow-dir <path>` (repeatable) persists allowedDirectories; upstream default is the home directory, blocked-commands list unchanged
-- e2e: `scripts/e2e-admin.mjs` 8/8; previous suites unchanged
-
-### Not done (deliberately)
-- Postgres store: SQLite is sufficient for a single relay instance; add only for multi-instance
-- multi-tenant users: v1 is single admin user
-- dropping md-to-pdf/puppeteer from the agent (write_pdf downloads Chrome on first use)
-
-## Phase 6 status (hardening)
-- `pnpm test` = `test:unit` (node:test: password hashing, store tokens/devices/pairing/audit, login limiter, device hub protocol/id mismatch, timeouts, ambiguity) + `test:e2e` (`scripts/e2e-all.mjs` boots relay + agent on a scratch port/db, auto-pairs, then runs OAuth/MCP and admin checks)
-- `.github/workflows/ci.yml`: build + unit + e2e on ubuntu and windows, npm tarball artifacts, Docker image build + smoke
-- security headers (nosniff, frame DENY, no-referrer, no-store, HSTS on https), body limits on public endpoints (64 kb forms, 4 kb pairing JSON)
-- SECURITY.md: model, defaults, threat notes
-- rate-limit caveat: e2e-admin locks `admin` for 5 min; the runner uses a fresh relay so it is only an issue when running that script by hand twice
+`pnpm release:brc` 使用 CLI 清单中的明确版本，生成 gzip 9 发行包、运行隔离测试并发布到 npm。只有注册表确认发布后才创建 `brc-v<version>` Git 标签。发布失败的恢复与发行包精简属于独立维护任务；GitHub CI 只验证源码，不自动发布。
