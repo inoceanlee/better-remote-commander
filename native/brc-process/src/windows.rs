@@ -44,6 +44,37 @@ fn handle_identity(pid: u32) -> Result<Option<(OwnedHandle, String, String)>, &'
             return if GetLastError() == 87 { Ok(None) } else { Err("OPEN_PROCESS") };
         }
         let owned = OwnedHandle(handle);
+        let mut code: DWORD = 0;
+        if GetExitCodeProcess(handle, &mut code) == 0 { return Err("PROCESS_STATE"); }
+        if code != 259 { return Ok(None); }
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) == 0 {
+            return if terminated(handle) { Ok(None) } else { Err("PROCESS_TIMES") };
+        }
+        let mut length: DWORD = 32768;
+        let mut buffer = vec![0u16; length as usize];
+        if QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) == 0 {
+            return if terminated(handle) { Ok(None) } else { Err("PROCESS_PATH") };
+        }
+        let path = std::ffi::OsString::from_wide(&buffer[..length as usize])
+            .to_string_lossy().into_owned();
+        Ok(Some((owned, filetime(&created).to_string(), path)))
+    }
+}
+fn terminated(handle: HANDLE) -> bool {
+    unsafe {
+        let mut code: DWORD = 0;
+        GetExitCodeProcess(handle, &mut code) != 0 && code != 259
+    }
+}
+fn alive_and_same(handle: HANDLE, expected: &str) -> Result<bool, &'static str> {
+    unsafe {
+        let mut code: DWORD = 0;
+        if GetExitCodeProcess(handle, &mut code) == 0 { return Err("PROCESS_STATE"); }
+        if code != 259 { return Ok(false); }
         let mut created: FILETIME = std::mem::zeroed();
         let mut exit: FILETIME = std::mem::zeroed();
         let mut kernel: FILETIME = std::mem::zeroed();
@@ -51,26 +82,8 @@ fn handle_identity(pid: u32) -> Result<Option<(OwnedHandle, String, String)>, &'
         if GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) == 0 {
             return Err("PROCESS_TIMES");
         }
-        let mut length: DWORD = 32768;
-        let mut buffer = vec![0u16; length as usize];
-        if QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) == 0 {
-            return Err("PROCESS_PATH");
-        }
-        let path = std::ffi::OsString::from_wide(&buffer[..length as usize])
-            .to_string_lossy().into_owned();
-        Ok(Some((owned, filetime(&created).to_string(), path)))
-    }
-}
-fn alive_and_same(handle: HANDLE, expected: &str) -> bool {
-    unsafe {
-        let mut code: DWORD = 0;
-        if GetExitCodeProcess(handle, &mut code) == 0 || code != 259 { return false; }
-        let mut created: FILETIME = std::mem::zeroed();
-        let mut exit: FILETIME = std::mem::zeroed();
-        let mut kernel: FILETIME = std::mem::zeroed();
-        let mut user: FILETIME = std::mem::zeroed();
-        GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) != 0
-            && filetime(&created).to_string() == expected
+        if filetime(&created).to_string() != expected { return Err("PROCESS_CHANGED"); }
+        Ok(true)
     }
 }
 unsafe fn read_variant_text(object: *mut IWbemClassObject, field: &str) -> Result<Option<String>, &'static str> {
@@ -183,9 +196,10 @@ pub fn inspect(pids: &[u32]) -> Vec<Value> {
             Ok(None) => Ok(None),
             Err(code) => Err(code),
             Ok(Some((handle, created_at, executable_path))) => {
-                if !alive_and_same(handle.0, &created_at) { Err("PROCESS_CHANGED") }
-                else {
-                    match &commands {
+                match alive_and_same(handle.0, &created_at) {
+                    Ok(false) => Ok(None),
+                    Err(code) => Err(code),
+                    Ok(true) => match &commands {
                         Err(code) => Err(*code),
                         Ok(commands) => match commands.get(&pid) {
                             None => Err("WMI_MISSING"),
@@ -194,7 +208,7 @@ pub fn inspect(pids: &[u32]) -> Vec<Value> {
                                 created_at, executable_path, command_line: command_line.clone(),
                             })),
                         },
-                    }
+                    },
                 }
             },
         };

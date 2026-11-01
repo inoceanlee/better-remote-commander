@@ -27,3 +27,19 @@ test('native inspector rejects malformed arguments and reports missing processes
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { processes: [{ pid: 4294967294, status: 'not_found' }] });
 });
+
+test('Windows inspector fails closed when its packaged binary is missing', async () => {
+  const { mkdtempSync, mkdirSync, copyFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { pathToFileURL } = await import('node:url');
+  const root = mkdtempSync(path.join(tmpdir(), 'brc-inspector-missing-'));
+  try {
+    const destination = path.join(root, 'dist', 'lifecycle', 'identity.mjs');
+    mkdirSync(path.dirname(destination), { recursive: true });
+    copyFileSync(path.resolve('packages/cli/dist/lifecycle/identity.js'), destination);
+    const { inspectProcesses } = await import(pathToFileURL(destination).href);
+    if (process.platform === 'win32') {
+      await assert.rejects(inspectProcesses([process.pid]), /Native Windows process inspection failed/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
