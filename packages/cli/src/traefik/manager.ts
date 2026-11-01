@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { BrcPaths } from '../config/paths.js';
 import type { BrcSettings } from '../config/settings.js';
 import type { LockedServiceOperations, ServiceManager } from '../lifecycle/services.js';
-import { readChecksum, renderConfig, type TraefikRelease, type VersionManifest } from './core.js';
+import { processArchive, readChecksum, renderConfig, type TraefikRelease, type VersionManifest } from './core.js';
 import { readManifest, TraefikInput, type TraefikInputOptions } from './input.js';
 import { ensureSafeDirectory, TraefikOutput } from './output.js';
 import { runHealthProbe, verifyExecutable, waitForConfigGeneration } from './runtime.js';
@@ -218,16 +218,18 @@ export class TraefikManager {
     const checksum = await this.progress(operation, 'release', async () =>
       readChecksum(await this.input.downloadChecksum(release), release.archiveName));
     this.emit({ operation, stage: 'download', status: 'started' });
-    let response: Response;
+    let archive: Buffer;
     try {
-      response = await this.input.downloadArchive(release);
+      archive = await this.input.downloadArchive(release, (completedBytes, totalBytes) => {
+        this.emit({ operation, stage: 'download', status: 'started', completedBytes, totalBytes });
+      });
+      this.emit({ operation, stage: 'download', status: 'completed' });
     } catch (error) {
       this.emit({ operation, stage: 'download', status: 'failed' });
       throw error;
     }
-    return this.output.stageArchive(release, response, checksum, (stage, status, completedBytes, totalBytes) => {
-      this.emit({ operation, stage, status, completedBytes, totalBytes });
-    });
+    const executable = await this.progress(operation, 'verify', () => processArchive(archive, checksum));
+    return this.progress(operation, 'stage', () => this.output.stageArchive(release, executable));
   }
 
   private async progress<T>(operation: TraefikProgressEvent['operation'], stage: TraefikProgressEvent['stage'], action: () => Promise<T>): Promise<T> {

@@ -44,7 +44,7 @@ export class TraefikInput {
       const retryAfterHeader = response.headers.get('retry-after');
       const retryAfterSeconds = retryAfterHeader === null ? NaN : Number(retryAfterHeader);
       if (response.status === 429 && Number.isFinite(retryAfterSeconds)
-          && retryAfterSeconds > TRAEFIK_RELEASE_RETRY_DELAY_MS / 1000) {
+        && retryAfterSeconds > TRAEFIK_RELEASE_RETRY_DELAY_MS / 1000) {
         throw new Error(`GitHub API is throttling requests (HTTP 429). Retry after ${retryAfterSeconds} seconds before running brc setup.`);
       }
       const transient = [403, 429, 500, 502, 503, 504].includes(response.status);
@@ -86,10 +86,35 @@ export class TraefikInput {
     return response.text();
   }
 
-  async downloadArchive(release: TraefikRelease): Promise<Response> {
+  async downloadArchive(
+    release: TraefikRelease,
+    onProgress?: (completedBytes: number, totalBytes?: number) => void,
+  ): Promise<Buffer> {
     const response = await this.fetchImpl(release.archiveUrl, { signal: AbortSignal.timeout(5 * 60_000) });
     if (!response.ok || !response.body) throw new Error(`Cannot download the official Traefik ZIP: HTTP ${response.status}.`);
-    return response;
+
+    const length = response.headers.get('content-length');
+    const parsedLength = length && /^\d+$/.test(length) ? Number(length) : undefined;
+    const totalBytes = !response.headers.get('content-encoding') && parsedLength !== undefined
+      && Number.isSafeInteger(parsedLength) && parsedLength > 0 ? parsedLength : undefined;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let completedBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        completedBytes += value.byteLength;
+        onProgress?.(completedBytes, totalBytes);
+      }
+    } catch (error) {
+      void reader.cancel().catch(() => undefined);
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks, completedBytes);
   }
 
 

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import unzipper from 'unzipper';
 import type { BrcSettings } from '../config/settings.js';
 import type { ZipEntry } from 'unzipper';
 
@@ -89,34 +91,34 @@ export function renderConfig({ templates, dynamicSettings, staticSettings, dynam
   };
 }
 export function readChecksum(contents: string, filename: string): string {
-    for (const line of contents.split(/\r?\n/)) {
-      const match = line.trim().match(/^([a-f\d]{64})\s+\*?(.+)$/i);
-      if (match?.[2] === filename) return match[1].toLowerCase();
-    }
-    throw new Error(`Official Traefik checksum file does not contain ${filename}.`);
+  for (const line of contents.split(/\r?\n/)) {
+    const match = line.trim().match(/^([a-f\d]{64})\s+\*?(.+)$/i);
+    if (match?.[2] === filename) return match[1].toLowerCase();
   }
+  throw new Error(`Official Traefik checksum file does not contain ${filename}.`);
+}
 
 export function parseRelease(value: unknown): TraefikRelease {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Official Traefik release metadata is malformed.');
-    const release = value as Record<string, unknown>;
-    if (release.draft !== false || release.prerelease !== false || typeof release.tag_name !== 'string') {
-      throw new Error('The latest Traefik release is not a stable release.');
-    }
-    const match = release.tag_name.match(/^v(\d+\.\d+\.\d+)$/);
-    if (!match) throw new Error(`Official Traefik release tag is invalid: ${release.tag_name}`);
-    const version = match[1];
-    const archiveName = `traefik_v${version}_windows_amd64.zip`;
-    const checksumName = `traefik_v${version}_checksums.txt`;
-    if (!Array.isArray(release.assets)) throw new Error('Official Traefik release has no asset list.');
-    const assets = release.assets as unknown[];
-    const findAsset = (name: string): string => {
-      const asset = assets.find((item) => item && typeof item === 'object' && (item as Record<string, unknown>).name === name) as Record<string, unknown> | undefined;
-      const url = asset?.browser_download_url;
-      const expected = `https://github.com/traefik/traefik/releases/download/v${version}/${name}`;
-      if (url !== expected) throw new Error(`Official Traefik asset is missing or has an unexpected URL: ${name}`);
-      return expected;
-    };
-    return { version, archiveName, archiveUrl: findAsset(archiveName), checksumUrl: findAsset(checksumName) };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Official Traefik release metadata is malformed.');
+  const release = value as Record<string, unknown>;
+  if (release.draft !== false || release.prerelease !== false || typeof release.tag_name !== 'string') {
+    throw new Error('The latest Traefik release is not a stable release.');
+  }
+  const match = release.tag_name.match(/^v(\d+\.\d+\.\d+)$/);
+  if (!match) throw new Error(`Official Traefik release tag is invalid: ${release.tag_name}`);
+  const version = match[1];
+  const archiveName = `traefik_v${version}_windows_amd64.zip`;
+  const checksumName = `traefik_v${version}_checksums.txt`;
+  if (!Array.isArray(release.assets)) throw new Error('Official Traefik release has no asset list.');
+  const assets = release.assets as unknown[];
+  const findAsset = (name: string): string => {
+    const asset = assets.find((item) => item && typeof item === 'object' && (item as Record<string, unknown>).name === name) as Record<string, unknown> | undefined;
+    const url = asset?.browser_download_url;
+    const expected = `https://github.com/traefik/traefik/releases/download/v${version}/${name}`;
+    if (url !== expected) throw new Error(`Official Traefik asset is missing or has an unexpected URL: ${name}`);
+    return expected;
+  };
+  return { version, archiveName, archiveUrl: findAsset(archiveName), checksumUrl: findAsset(checksumName) };
 }
 
 export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
@@ -137,4 +139,14 @@ export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
 
 export function verifyChecksum(actual: string, expected: string): void {
   if (actual !== expected) throw new Error('Official Traefik ZIP SHA-256 checksum does not match.');
+}
+export async function processArchive(archive: Buffer, expectedChecksum: string): Promise<ZipEntry> {
+  const actualChecksum = createHash('sha256').update(archive).digest('hex');
+  verifyChecksum(actualChecksum, expectedChecksum);
+  const open = unzipper.Open;
+  if (!('buffer' in open) || typeof open.buffer !== 'function') {
+    throw new Error('ZIP library does not support in-memory archive processing.');
+  }
+  const directory = await open.buffer(archive);
+  return validateArchiveEntries(directory.files);
 }
