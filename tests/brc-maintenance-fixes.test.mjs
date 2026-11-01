@@ -13,7 +13,7 @@ const release = (v) => ({ tag_name: 'v' + v, draft: false, prerelease: false, as
 ]});
 test('release discovery retries a transient GitHub 403 and retains validation', async () => {
   let attempts = 0;
-  const input = new TraefikInput({}, { releaseApiUrl: api, fetch: async () => {
+  const input = new TraefikInput({ releaseApiUrl: api, fetch: async () => {
     attempts++;
     return attempts === 1 ? new Response('temporary forbidden', {status:403}) : Response.json(release('3.7.17'));
   }});
@@ -23,7 +23,7 @@ test('release discovery retries a transient GitHub 403 and retains validation', 
 
 test('release discovery reports a confirmed rate limit without unnecessary retry', async () => {
   let attempts = 0;
-  const input = new TraefikInput({}, { fetch: async () => {
+  const input = new TraefikInput({ fetch: async () => {
     attempts++;
     return new Response('API rate limit exceeded', {status:403,headers:{'x-ratelimit-remaining':'0','x-ratelimit-reset':'2000000000'}});
   }});
@@ -99,7 +99,7 @@ test('real Agent exposes a manageable pairing state before user approval', async
 test('release discovery recovers from a network interruption, 429, and 503', async () => {
  for(const failure of ['network',429,503]){
    let attempts=0;
-   const input=new TraefikInput({}, {fetch:async()=>{
+   const input=new TraefikInput({fetch:async()=>{
      attempts++;
      if(attempts===1){
        if(failure==='network')throw new Error('socket closed');
@@ -114,7 +114,7 @@ test('release discovery recovers from a network interruption, 429, and 503', asy
 
 test('release discovery respects a long retry-after window', async () => {
  let attempts=0;
- const input=new TraefikInput({}, {fetch:async()=>{
+ const input=new TraefikInput({fetch:async()=>{
    attempts++;
    return new Response('rate limited',{status:429,headers:{'retry-after':'60'}});
  }});
