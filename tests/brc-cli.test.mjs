@@ -272,7 +272,7 @@ test('config set persists validated settings in the selected data root', async (
   assert.match(config, /average: 20/);
 });
 test('interactive first setup asks for password and confirmation before accepting credentials', async () => {
-  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup.js');
   const prompts = [];
   const answers = ['example-password', 'example-password'];
   const credentials = await collectAdministratorCredentials({ BRC_ADMIN_USER: 'operator' }, true, {
@@ -284,7 +284,7 @@ test('interactive first setup asks for password and confirmation before acceptin
 });
 
 test('interactive first setup rejects mismatched passwords before creating an identity', async () => {
-  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup.js');
   const prompts = [];
   const answers = ['example-password', 'different-password'];
   await assert.rejects(collectAdministratorCredentials({}, true, {
@@ -295,7 +295,7 @@ test('interactive first setup rejects mismatched passwords before creating an id
 });
 
 test('explicit environment password keeps noninteractive setup compatible', async () => {
-  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup.js');
   const credentials = await collectAdministratorCredentials({ BRC_ADMIN_USER: 'ci', BRC_ADMIN_PASSWORD: 'example-password' }, false, {
     askUsername: async () => { throw new Error('must not prompt'); },
     askHiddenPassword: async () => { throw new Error('must not prompt'); },
@@ -304,9 +304,57 @@ test('explicit environment password keeps noninteractive setup compatible', asyn
 });
 
 test('first setup without a terminal or supplied password refuses to initialize', async () => {
-  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup/administrator.js');
+  const { collectAdministratorCredentials } = await import('../packages/cli/dist/commands/setup.js');
   await assert.rejects(collectAdministratorCredentials({}, false, {
     askUsername: async () => { throw new Error('must not prompt'); },
     askHiddenPassword: async () => { throw new Error('must not prompt'); },
   }), /interactive terminal.*administrator password/i);
+});
+
+test('Traefik progress renders real byte percentages and stops on completion', async () => {
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const output = { isTTY: true, text: '', write(value) { this.text += value; } };
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 50, totalBytes: 100 });
+  progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 20, totalBytes: 100 });
+  progress.report({ operation: 'setup', stage: 'download', status: 'completed', completedBytes: 100, totalBytes: 100 });
+  const text = output.text;
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(output.text, text);
+  assert.match(text, /50%/);
+  assert.doesNotMatch(text, /20%/);
+});
+
+test('non-TTY progress reports stages once without ANSI or percentages', async () => {
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const output = { isTTY: false, text: '', write(value) { this.text += value; } };
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'update', stage: 'download', status: 'started' });
+  progress.report({ operation: 'update', stage: 'download', status: 'started', completedBytes: 1 });
+  progress.report({ operation: 'update', stage: 'download', status: 'completed' });
+  assert.equal(output.text.split('\n').filter(Boolean).length, 1);
+  assert.doesNotMatch(output.text, /\x1b|%|\r/);
+});
+
+test('failed progress stops animation', async () => {
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const output = { isTTY: true, text: '', write(value) { this.text += value; } };
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'health', status: 'started' });
+  progress.report({ operation: 'setup', stage: 'health', status: 'failed' });
+  const text = output.text;
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(output.text, text);
+});
+
+test('interrupt cleanup stops an active progress animation', async () => {
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  const output = { isTTY: true, text: '', write(value) { this.text += value; } };
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  progress.stop();
+  const text = output.text;
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(output.text, text);
 });

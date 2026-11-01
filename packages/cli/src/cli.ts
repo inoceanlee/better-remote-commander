@@ -3,7 +3,7 @@ import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runConfigCommand } from './commands/config.js';
-import { requestAdministrator } from './commands/setup/input.js';
+import { requestAdministrator } from './commands/setup.js';
 import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
 import { SettingsManager } from './config/manager.js';
 import { readSettings } from './config/reader.js';
@@ -16,6 +16,7 @@ import { createMaintenanceCommands } from './commands/maintenance.js';
 import { TraefikManager } from './traefik/manager.js';
 import { runManagedTraefikService } from './traefik/runtime.js';
 import { RelayDatabase } from './lifecycle/relay-database.js';
+import { TraefikProgress } from './progress.js';
 
 export type CliLogComponent = 'relay' | 'agent' | 'traefik';
 type CommandResult = number | void;
@@ -278,7 +279,8 @@ async function main(): Promise<void> {
     (message) => console.error(message),
     { stopServices: () => serviceManager.stop() },
   );
-  const traefikManager = new TraefikManager(paths, settings, traefikServiceManager, { loadSettings });
+  const progress = new TraefikProgress(process.stderr);
+  const traefikManager = new TraefikManager(paths, settings, traefikServiceManager, { loadSettings, reporter: (event) => progress.report(event) });
   configTraefikManager = traefikManager;
   const deps: CliDependencies = {
     paths,
@@ -356,7 +358,11 @@ async function main(): Promise<void> {
     write: (message) => console.log(message),
     writeError: (message) => console.error(message),
   };
-  process.exitCode = await runCli(process.argv.slice(2), deps);
+  try {
+    process.exitCode = await runCli(process.argv.slice(2), deps);
+  } finally {
+    progress.stop();
+  }
 }
 
 function isMainModule(): boolean {

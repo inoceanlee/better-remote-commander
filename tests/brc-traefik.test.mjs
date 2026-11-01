@@ -913,3 +913,77 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
   assert.equal(await httpStatus(proxyPort, '/mcp', { headers: { 'X.Auth.User': 'spoofed' } }), 400);
   assert.equal(webSockets, 0);
 });
+
+test('setup emits streamed download bytes and verifies before staging', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const events = [];
+  const originalFetch = release.fetch;
+  const manager = makeManager(brcPaths, release, {
+    reporter: (event) => events.push(event),
+    fetch: async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (!url.endsWith('_windows_amd64.zip')) return originalFetch(input, init);
+      const half = Math.floor(release.archive.length / 2);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(release.archive.subarray(0, half));
+          controller.enqueue(release.archive.subarray(half));
+          controller.close();
+        },
+      }), { headers: { 'content-length': String(release.archive.length) } });
+    },
+  });
+  await manager.setup();
+  const bytes = events.filter((event) => event.stage === 'download' && event.status === 'started' && event.completedBytes > 0);
+  assert.deepEqual(bytes.map((event) => event.completedBytes), [Math.floor(release.archive.length / 2), release.archive.length]);
+  assert.ok(bytes.every((event) => event.totalBytes === release.archive.length));
+  const verify = events.findIndex((event) => event.stage === 'verify' && event.status === 'started' && events.indexOf(event) > events.indexOf(bytes.at(-1)));
+  const stage = events.findIndex((event) => event.stage === 'stage' && event.status === 'started');
+  assert.ok(verify > 0 && stage > verify);
+});
+
+test('download with unknown length never reports a total', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const events = [];
+  await makeManager(brcPaths, release, { reporter: (event) => events.push(event) }).setup();
+  const download = events.filter((event) => event.stage === 'download');
+  assert.ok(download.some((event) => event.status === 'completed'));
+  assert.ok(download.every((event) => event.totalBytes === undefined));
+});
+
+test('reporter errors cannot replace an operation failure or leak staging', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16', { checksum: '0'.repeat(64) });
+  const manager = makeManager(brcPaths, release, { reporter: () => { throw new Error('reporter failed'); } });
+  await assert.rejects(manager.setup(), /checksum/i);
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(path.join(brcPaths.traefik, 'versions')), []);
+  assert.deepEqual(await readdir(brcPaths.tmp), []);
+});
+
+test('checksum failure emits failed verification without completed verification', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16', { checksum: '0'.repeat(64) });
+  const events = [];
+  await assert.rejects(makeManager(brcPaths, release, { reporter: (event) => events.push(event) }).setup(), /checksum/i);
+  assert.ok(events.some((event) => event.stage === 'download' && event.status === 'completed'));
+  assert.ok(events.some((event) => event.stage === 'verify' && event.status === 'failed'));
+  assert.ok(!events.some((event) => event.stage === 'verify' && event.status === 'completed'));
+});
+
+test('configuration and rollback emit their own phase events', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const events = [];
+  const manager = makeManager(brcPaths, release, { reporter: (event) => events.push(event) });
+  await manager.setup();
+  release.setVersion('3.7.17');
+  await manager.update();
+  await manager.writeConfig();
+  await manager.rollbackUpdate();
+  for (const [operation, stage] of [['config', 'config'], ['update', 'activate'], ['rollback', 'verify'], ['rollback', 'health'], ['rollback', 'activate']]) {
+    assert.ok(events.some((event) => event.operation === operation && event.stage === stage && event.status === 'completed'));
+  }
+});

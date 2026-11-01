@@ -56,8 +56,8 @@ export class TraefikManager {
       const installed = await readManifest(this.paths.traefik);
       if (installed) {
         const executable = await this.output.executableFor(installed.current);
-        await this.verify(executable, installed.current);
-        await this.healthCheck(executable, installed.current);
+        await this.progress('setup', 'verify', () => this.verify(executable, installed.current));
+        await this.progress('setup', 'health', () => this.healthCheck(executable, installed.current));
         await this.lifecycle.withLock(async () => {
           const current = await readManifest(this.paths.traefik);
           if (!current || current.current !== installed.current) {
@@ -79,7 +79,7 @@ export class TraefikManager {
         await this.lifecycle.withLock(async () => {
           if (await readManifest(this.paths.traefik)) return;
           await this.writeCurrentConfig();
-          await this.output.promoteVersion(stage, release.version, null);
+          await this.progress('setup', 'activate', () => this.output.promoteVersion(stage, release.version, null));
         });
       } finally {
         await rm(stage, { recursive: true, force: true });
@@ -116,7 +116,7 @@ export class TraefikManager {
           const running = await this.isRunning();
           try {
             if (running) await operations.stop();
-            await this.output.promoteVersion(stage, release.version, installed.current);
+            await this.progress('update', 'activate', () => this.output.promoteVersion(stage, release.version, installed.current));
             if (running) {
               await operations.start();
               if (!await this.isRunning()) throw new Error('Traefik did not become healthy after update.');
@@ -140,8 +140,8 @@ export class TraefikManager {
       const initial = await readManifest(this.paths.traefik);
       if (!initial?.previous) throw new Error('No previous Traefik version is available for rollback.');
       const executable = await this.output.executableFor(initial.previous);
-      await this.verify(executable, initial.previous);
-      await this.healthCheck(executable, initial.previous);
+      await this.progress('rollback', 'verify', () => this.verify(executable, initial.previous));
+      await this.progress('rollback', 'health', () => this.healthCheck(executable, initial.previous));
       const rollback: VersionManifest = { version: 1, current: initial.previous, previous: initial.current };
       await this.lifecycle.withLock(async (operations) => {
         const installed = await readManifest(this.paths.traefik);
@@ -151,7 +151,7 @@ export class TraefikManager {
         const wasRunning = await this.isRunning();
         try {
           if (wasRunning) await operations.stop();
-          await this.output.writeManifest(rollback);
+          await this.progress('rollback', 'activate', () => this.output.writeManifest(rollback));
           if (wasRunning) {
             await operations.start();
             if (!await this.isRunning()) throw new Error('Traefik did not become healthy after rollback.');
@@ -165,11 +165,11 @@ export class TraefikManager {
 
   writeConfig(previous?: Readonly<BrcSettings>): Promise<void> {
     return this.lifecycle.withLock(async () => {
-      await this.writeConfigAndConfirm(await this.loadSettings(), previous);
+      await this.progress('config', 'config', async () => this.writeConfigAndConfirm(await this.loadSettings(), previous));
     });
   }
   writeConfigWithLockHeld(settings: Readonly<BrcSettings>, previous?: Readonly<BrcSettings>): Promise<void> {
-    return this.writeConfigAndConfirm(settings, previous);
+    return this.progress('config', 'config', () => this.writeConfigAndConfirm(settings, previous));
   }
 
   private async writeCurrentConfig(): Promise<void> {
@@ -214,21 +214,38 @@ export class TraefikManager {
   }
 
   private async stageRelease(release: TraefikRelease, operation: 'setup' | 'update'): Promise<string> {
-    const checksum = await this.progress(operation, 'verify', async () =>
+    const checksum = await this.progress(operation, 'release', async () =>
       readChecksum(await this.input.downloadChecksum(release), release.archiveName));
-    const response = await this.progress(operation, 'download', () => this.input.downloadArchive(release));
-    return this.progress(operation, 'stage', () => this.output.stageArchive(release, response, checksum));
+    this.emit({ operation, stage: 'download', status: 'started' });
+    let response: Response;
+    try {
+      response = await this.input.downloadArchive(release);
+    } catch (error) {
+      this.emit({ operation, stage: 'download', status: 'failed' });
+      throw error;
+    }
+    return this.output.stageArchive(release, response, checksum, (stage, status, completedBytes, totalBytes) => {
+      this.emit({ operation, stage, status, completedBytes, totalBytes });
+    });
   }
 
   private async progress<T>(operation: TraefikProgressEvent['operation'], stage: TraefikProgressEvent['stage'], action: () => Promise<T>): Promise<T> {
-    this.reporter?.({ operation, stage, status: 'started' });
+    this.emit({ operation, stage, status: 'started' });
     try {
       const result = await action();
-      this.reporter?.({ operation, stage, status: 'completed' });
+      this.emit({ operation, stage, status: 'completed' });
       return result;
     } catch (error) {
-      this.reporter?.({ operation, stage, status: 'failed' });
+      this.emit({ operation, stage, status: 'failed' });
       throw error;
+    }
+  }
+
+  private emit(event: TraefikProgressEvent): void {
+    try {
+      this.reporter?.(event);
+    } catch {
+      // Progress output must not change the operation or its cleanup.
     }
   }
 
