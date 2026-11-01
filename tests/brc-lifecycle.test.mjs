@@ -111,7 +111,7 @@ async function makeHarness(t, options = {}) {
     ...(options.processOptions ?? {}),
   });
   t.after(async () => {
-    try { await manager.stop(spec); } catch { /* Preserve the original assertion failure. */ }
+    try { await manager.stop(spec); } catch { return; }
     await rm(root, { recursive: true, force: true });
   });
   return { root, paths: runtimePaths, spec, manager, entrypoint };
@@ -764,5 +764,7 @@ test('refuses forced termination when the PID identity changes after shutdown', 
     assert.equal((await harness.manager.status(harness.spec)).state, 'running');
   } finally {
     stopping = false;
+    harness.manager.updateRuntimeSettings({ startupTimeoutMs: 3000, shutdownTimeoutMs: 5000 });
+    await harness.manager.stop(harness.spec);
   }
 });
