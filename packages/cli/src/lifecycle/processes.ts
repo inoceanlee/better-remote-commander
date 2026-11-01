@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -72,8 +73,13 @@ function recordPath(paths: BrcPaths, name: ManagedServiceName): string {
 }
 
 function samePath(left: string, right: string): boolean {
-  const a = path.resolve(left);
-  const b = path.resolve(right);
+  const canonical = (filename: string) => {
+    const resolved = path.resolve(filename);
+    try { return realpathSync.native(resolved); }
+    catch { return resolved; }
+  };
+  const a = canonical(left);
+  const b = canonical(right);
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 

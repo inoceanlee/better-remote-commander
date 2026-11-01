@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
 import { inspectProcess, ProcessManager, type ManagedServiceName, type ProcessIdentity } from '../lifecycle/processes.js';
 import { inspectProcesses } from '../lifecycle/identity.js';
 import { LifecycleLock } from '../lifecycle/lock.js';
+import { LockStore } from '../lifecycle/lock-store.js';
 
 const SERVICE_NAMES: ManagedServiceName[] = ['relay', 'traefik', 'agent'];
 
@@ -270,43 +271,28 @@ async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dry
 }
 
 
-function sameIdentity(record: Record<string, unknown>, current: ProcessIdentity): boolean {
-  const executablePath = typeof record.executablePath === 'string' ? record.executablePath : '';
-  const commandLine = typeof record.commandLine === 'string' ? record.commandLine : '';
-  const normalize = (value: string) => process.platform === 'win32' ? value.replaceAll('/', '\\').toLowerCase() : value;
-  return record.pid === current.pid
-    && record.createdAt === current.createdAt
-    && normalize(executablePath) === normalize(current.executablePath)
-    && normalize(commandLine) === normalize(current.commandLine);
-}
-
-async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: IdentitySnapshot): Promise<void> {
+async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean): Promise<void> {
   const filename = path.join(paths.runtime, 'lifecycle.lock');
-  let record: Record<string, unknown>;
-  let contents: string;
+  const store = new LockStore(paths);
   try {
-    const file = await readRegularFile(filename);
-    contents = file.contents;
-    const value = JSON.parse(file.contents) as unknown;
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Lock record is malformed.');
-    record = value as Record<string, unknown>;
-    if (typeof record.pid !== 'number' || !Number.isSafeInteger(record.pid) || record.pid <= 0
-        || typeof record.createdAt !== 'string' || typeof record.executablePath !== 'string'
-        || typeof record.commandLine !== 'string') throw new Error('Lock record is incomplete.');
+    await store.readOwner();
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') return;
-    issue(report.preserved, filename, error instanceof Error ? error.message : String(error));
+    if (errorCode(error) !== 'ENOENT') {
+      issue(report.preserved, filename, `Lock owner is damaged or unverified: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return;
   }
-
   try {
-    const current = snapshotIdentity(snapshot, record.pid as number);
-    if (current && !sameIdentity(record, current)) {
-      issue(report.preserved, filename, 'Lock PID was reused or no longer matches its saved identity.');
-      return;
+    if (dryRun) {
+      const owner = await store.readOwner();
+      const current = await inspectProcess(owner.owner.pid);
+      if (current) issue(report.preserved, filename, 'Lifecycle lock belongs to a live or reused process.');
+      else report.wouldRemove++;
+    } else if (await store.reclaimExpired(inspectProcess)) {
+      report.removed++;
+    } else {
+      issue(report.preserved, filename, 'Lifecycle lock belongs to a live process.');
     }
-    if (!current) await removeUnchangedRecord(paths, filename, contents, record.pid as number, report, dryRun);
-    else issue(report.preserved, filename, 'Lifecycle lock belongs to a live process.');
   } catch (error) {
     issue(report.preserved, filename, `Lock owner identity could not be verified: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -579,30 +565,11 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
   }
   if (!await safeDirectory(paths.root, paths.runtime, report)) return report;
 
-  const lockPath = path.join(paths.runtime, 'lifecycle.lock');
-  try {
-    const lockFile = await readRegularFile(lockPath);
-    const value = JSON.parse(lockFile.contents) as unknown;
-    if (!value || typeof value !== 'object' || !('pid' in value)
-        || typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0) {
-      throw new Error('Lock record has no valid PID.');
-    }
-    let snapshot: IdentitySnapshot;
-    try {
-      snapshot = await inspectProcesses([value.pid]);
-    } catch (error) {
-      snapshot = error instanceof Error ? error : new Error(String(error));
-    }
-    await cleanLifecycleLock(paths, report, dryRun, snapshot);
-  } catch (error) {
-    if (errorCode(error) !== 'ENOENT') {
-      issue(report.preserved, lockPath, `Lock record is damaged or unverified: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  await cleanLifecycleLock(paths, report, dryRun);
   if (!await hasProtectedCleanupCandidates(paths, report)) return report;
 
   try {
-    await new LifecycleLock(paths).runExclusive(async () => {
+    await new LifecycleLock(paths, { waitMs: settings.runtime.lockWaitMs, pollMs: settings.runtime.lockPollMs }).runExclusive(async () => {
       const snapshot = await runtimeSnapshot(paths, report);
       const runtimes = await inspectServiceRecords(paths, report, dryRun, snapshot);
       await cleanReadyFiles(paths, report, dryRun, snapshot);

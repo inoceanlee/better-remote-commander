@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { cleanRuntime } from '../packages/cli/dist/maintenance/cleanup.js';
 import { ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
+import { inspectProcess } from '../packages/cli/dist/lifecycle/identity.js';
 import { appendRotatingLog } from '../packages/shared/dist/managed-log.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -241,11 +242,16 @@ test('preserves live and malformed ready and lock records', async (t) => {
   const lock = path.join(brcPaths.runtime, 'lifecycle.lock');
   await writeFile(ready, JSON.stringify({ pid: process.pid }));
   await writeFile(malformed, '{broken');
-  await writeFile(lock, JSON.stringify({ pid: process.pid, createdAt: 'wrong', executablePath: process.execPath, commandLine: 'wrong' }));
+  const identity = await inspectProcess(process.pid);
+  assert.ok(identity);
+  await mkdir(lock);
+  await writeFile(path.join(lock, 'owner.json'), JSON.stringify({
+    version: 1, ...identity, workspaceRoot: brcPaths.root, token: '76543210-4321-4321-4321-123456789abc',
+  }));
 
   const report = await cleanRuntime(brcPaths);
 
-  for (const filename of [ready, malformed, lock]) assert.equal(await exists(filename), true);
+  for (const filename of [ready, malformed, lock]) assert.equal(await exists(filename), true, filename);
   assert.ok(report.preserved.some((item) => item.path === lock));
   assert.ok(report.preserved.some((item) => item.path === brcPaths.runtime));
 });
@@ -293,127 +299,16 @@ test('removes ready and lock records for an exited process', async (t) => {
   const ready = path.join(brcPaths.runtime, 'relay.exited.ready.json');
   const lock = path.join(brcPaths.runtime, 'lifecycle.lock');
   await writeFile(ready, JSON.stringify({ pid: child.pid }));
-  await writeFile(lock, JSON.stringify({ pid: child.pid, createdAt: 'old', executablePath: process.execPath, commandLine: 'old' }));
+  await mkdir(lock);
+  await writeFile(path.join(lock, 'owner.json'), JSON.stringify({
+    version: 1, pid: child.pid, createdAt: 'old', executablePath: process.execPath,
+    commandLine: 'old', workspaceRoot: brcPaths.root, token: '76543210-4321-4321-4321-123456789abc',
+  }));
 
   await cleanRuntime(brcPaths);
 
   assert.equal(await exists(ready), false);
   assert.equal(await exists(lock), false);
-});
-
-function runSimulatedCimCleanup(root, scenario) {
-  const cleanupUrl = new URL('../packages/cli/dist/maintenance/cleanup.js', import.meta.url).href;
-  const source = `
-import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
-import path from 'node:path';
-
-const root = ${JSON.stringify(root)};
-const scenario = ${JSON.stringify(scenario)};
-const paths = Object.fromEntries(['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'].map((name) => [name, path.join(root, name)]));
-paths.root = root;
-const ready = path.join(paths.runtime, 'relay.sample.ready.json');
-const readyContents = JSON.stringify({ pid: 12 });
-const files = [];
-if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
-  for (const name of ['relay', 'traefik', 'agent']) {
-    const filename = path.join(paths.runtime, name + '.json');
-    writeFileSync(filename, JSON.stringify({
-      version: 1, service: name, id: '12345678-1234-1234-1234-123456789abc', pid: 11,
-      createdAt: 'old', executablePath: process.execPath, commandLine: 'old',
-      workspaceRoot: root, entrypoint: path.join(root, name + '.js'),
-      controlPort: 1234, controlToken: 'a'.repeat(64),
-    }));
-    files.push(filename);
-  }
-  writeFileSync(ready, readyContents);
-  files.push(ready);
-} else {
-  writeFileSync(ready, readyContents);
-}
-
-Object.defineProperty(process, 'platform', { value: 'win32' });
-const queries = [];
-childProcess.execFileSync = (_file, args) => {
-  const query = args.at(-1);
-  queries.push(query);
-  if (queries.length === 1) {
-    return JSON.stringify({ pid: process.pid, createdAt: 'owner', executablePath: process.execPath, commandLine: 'owner' });
-  }
-  if (scenario === 'failure') throw new Error('CIM access denied');
-  if (scenario === 'partial') {
-    if (queries.length === 2 || query.includes('ProcessId = 11')) throw new Error('CIM incomplete identity');
-    return '';
-  }
-  if (scenario === 'batch') {
-    return JSON.stringify([11, 12].map((pid) => ({
-      pid, createdAt: 'different', executablePath: process.execPath, commandLine: 'different',
-    })));
-  }
-  if (queries.length === 2) return '';
-  if (scenario === 'replacement') {
-    writeFileSync(ready, JSON.stringify({ pid: 13 }));
-    return '';
-  }
-  return JSON.stringify({ pid: 12, createdAt: 'new', executablePath: process.execPath, commandLine: 'new' });
-};
-syncBuiltinESMExports();
-const { cleanRuntime } = await import(${JSON.stringify(cleanupUrl)});
-const report = await cleanRuntime(paths);
-if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
-  assert.equal(queries.length, scenario === 'batch' ? 2 : scenario === 'failure' ? 4 : 5);
-  const pids = [...queries[1].matchAll(/ProcessId = (\\d+)/g)].map((match) => Number(match[1])).sort();
-  assert.deepEqual(pids, [11, 12]);
-  if (scenario === 'partial') {
-    for (const filename of files.slice(0, 3)) {
-      assert.ok(readFileSync(filename, 'utf8'));
-      assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM incomplete identity')));
-    }
-    assert.equal(existsSync(ready), false);
-  } else {
-    for (const filename of files) {
-      assert.ok(readFileSync(filename, 'utf8'));
-      assert.ok(report.preserved.some((item) => item.path === filename));
-      if (scenario === 'failure') {
-        assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM access denied')));
-      }
-    }
-  }
-} else {
-  assert.equal(queries.length, 3);
-  assert.equal(readFileSync(ready, 'utf8'), scenario === 'replacement' ? JSON.stringify({ pid: 13 }) : readyContents);
-  assert.ok(report.preserved.some((item) => item.path === ready && /changed|reused/i.test(item.reason)));
-}
-`;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', windowsHide: true });
-  assert.equal(child.status, 0, child.stderr);
-}
-
-test('cleanup deduplicates service and ready PIDs in one CIM query', async (t) => {
-  const { root } = await makeRoot(t);
-  runSimulatedCimCleanup(root, 'batch');
-});
-
-test('cleanup preserves every record when CIM inspection fails', async (t) => {
-  const { root } = await makeRoot(t);
-  runSimulatedCimCleanup(root, 'failure');
-});
-
-test('cleanup isolates an incomplete PID identity and cleans independently verified records', async (t) => {
-  const { root } = await makeRoot(t);
-  runSimulatedCimCleanup(root, 'partial');
-});
-
-test('cleanup preserves ready record when its PID is reused after the snapshot', async (t) => {
-  const { root } = await makeRoot(t);
-  runSimulatedCimCleanup(root, 'reuse');
-});
-
-test('cleanup preserves ready record replaced before removal', async (t) => {
-  const { root } = await makeRoot(t);
-  runSimulatedCimCleanup(root, 'replacement');
 });
 
 test('does not follow a directory junction outside the data root', async (t) => {
@@ -529,4 +424,18 @@ for (let i = 0; i < 3; i++) await fuzzySearchLogger.log(entry);
     total += size;
   }
   assert.ok(total <= 16 * MIB);
+});
+
+test('cleanup removes exited ready records while preserving live PIDs in the same batch', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const exited = spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  assert.equal(exited.status, 0);
+  const deadFile = path.join(brcPaths.runtime, 'relay.dead.ready.json');
+  const liveFile = path.join(brcPaths.runtime, 'agent.live.ready.json');
+  await writeFile(deadFile, JSON.stringify({ pid: exited.pid }));
+  await writeFile(liveFile, JSON.stringify({ pid: process.pid }));
+  const report = await cleanRuntime(brcPaths);
+  assert.equal(await exists(deadFile), false);
+  assert.equal(await exists(liveFile), true);
+  assert.ok(report.preserved.some((item) => item.path === liveFile));
 });

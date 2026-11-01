@@ -1,4 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -9,54 +11,67 @@ export interface ProcessIdentity {
   commandLine: string;
 }
 
+const run = promisify(execFile);
+const nativeBinary = fileURLToPath(new URL('../native/win32-x64/brc-process.exe', import.meta.url));
+
 function errorCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
 }
-
 function exitStatus(error: unknown): number | undefined {
   return error && typeof error === 'object' && 'status' in error && typeof error.status === 'number' ? error.status : undefined;
 }
-
 function parseProcessIdentity(value: unknown): ProcessIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value)
       || !('pid' in value) || !('createdAt' in value) || !('executablePath' in value) || !('commandLine' in value)
       || typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0
-      || typeof value.createdAt !== 'string' || !value.createdAt
-      || typeof value.executablePath !== 'string' || !value.executablePath
+      || typeof value.createdAt !== 'string' || !/^\d+$/.test(value.createdAt)
+      || typeof value.executablePath !== 'string' || !path.isAbsolute(value.executablePath)
       || typeof value.commandLine !== 'string' || !value.commandLine) {
     throw new Error('Windows returned incomplete process identity.');
   }
   return { pid: value.pid, createdAt: value.createdAt, executablePath: value.executablePath, commandLine: value.commandLine };
 }
 
-export async function inspectProcesses(pids: readonly number[]): Promise<Map<number, ProcessIdentity | null>> {
-  for (const pid of pids) {
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`Invalid process ID: ${pid}`);
+async function inspectWindows(pids: readonly number[]): Promise<Map<number, ProcessIdentity | null>> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run(nativeBinary, ['inspect', ...pids.map(String)], {
+      encoding: 'utf8', timeout: 5_000, windowsHide: true, shell: false,
+      maxBuffer: Math.min(pids.length * 64 * 1024, 64 * 1024 * 1024),
+    }));
+  } catch (error) {
+    throw new Error(`Native Windows process inspection failed: ${errorCode(error) ?? 'UNKNOWN'}.`, { cause: error });
   }
-  const unique = [...new Set(pids)];
-  const result = new Map<number, ProcessIdentity | null>(unique.map((pid) => [pid, null]));
-  if (!unique.length) return result;
-  if (process.platform === 'win32') {
-    const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const filter = unique.map((pid) => `ProcessId = ${pid}`).join(' OR ');
-    const script = `$ErrorActionPreference = 'Stop'; Get-CimInstance -ClassName Win32_Process -Filter '${filter}' | Select-Object @{Name='pid';Expression={$_.ProcessId}},@{Name='createdAt';Expression={if ($null -ne $_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}},@{Name='executablePath';Expression={$_.ExecutablePath}},@{Name='commandLine';Expression={$_.CommandLine}} | ConvertTo-Json -Compress`;
-    const output = execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8', timeout: 5_000, windowsHide: true, maxBuffer: Math.min(unique.length * 64 * 1024, 64 * 1024 * 1024),
-    }).trim();
-    if (!output) return result;
-    const parsed: unknown = JSON.parse(output);
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    for (const entry of entries) {
-      const identity = parseProcessIdentity(entry);
-      if (!result.has(identity.pid) || result.get(identity.pid) !== null) throw new Error('Windows returned unexpected process identity.');
-      result.set(identity.pid, identity);
-    }
-    return result;
+  let data: unknown;
+  try { data = JSON.parse(stdout) as unknown; }
+  catch { throw new Error('Native Windows process inspection returned malformed JSON.'); }
+  if (!data || typeof data !== 'object' || !('processes' in data) || !Array.isArray(data.processes)
+      || data.processes.length !== pids.length) throw new Error('Native Windows process inspection returned incomplete results.');
+  const result = new Map<number, ProcessIdentity | null>();
+  for (const entry of data.processes as unknown[]) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !('pid' in entry)
+        || !Number.isSafeInteger(entry.pid) || !pids.includes(entry.pid as number) || result.has(entry.pid as number)
+        || !('status' in entry)) throw new Error('Native Windows process inspection returned unexpected results.');
+    const pid = entry.pid as number;
+    if (entry.status === 'not_found') result.set(pid, null);
+    else if (entry.status === 'found') result.set(pid, parseProcessIdentity(entry));
+    else if (entry.status === 'error') {
+      const code = 'code' in entry && typeof entry.code === 'string' && /^[A-Z_]+$/.test(entry.code) ? entry.code : 'UNKNOWN';
+      throw new Error(`Native Windows process inspection could not verify PID ${pid}: ${code}.`);
+    } else throw new Error('Native Windows process inspection returned an invalid status.');
   }
-  await Promise.all(unique.map(async (pid) => { result.set(pid, await inspectNonWindows(pid)); }));
   return result;
 }
 
+export async function inspectProcesses(pids: readonly number[]): Promise<Map<number, ProcessIdentity | null>> {
+  for (const pid of pids) if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffffffff) throw new Error(`Invalid process ID: ${pid}`);
+  const unique = [...new Set(pids)];
+  if (!unique.length) return new Map();
+  if (process.platform === 'win32') return inspectWindows(unique);
+  const result = new Map<number, ProcessIdentity | null>();
+  await Promise.all(unique.map(async (pid) => { result.set(pid, await inspectNonWindows(pid)); }));
+  return result;
+}
 export async function inspectProcess(pid: number): Promise<ProcessIdentity | null> {
   return (await inspectProcesses([pid])).get(pid) ?? null;
 }
@@ -85,11 +100,11 @@ async function inspectNonWindows(pid: number): Promise<ProcessIdentity | null> {
   }
   if (process.platform === 'darwin') {
     try {
-      const createdAt = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', windowsHide: true }).trim();
-      const executablePath = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', windowsHide: true }).trim();
-      const commandLine = execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', windowsHide: true }).trim();
-      if (!createdAt || !executablePath || !commandLine) return null;
-      return { pid, createdAt, executablePath, commandLine };
+      const { stdout: createdAt } = await run('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', windowsHide: true });
+      const { stdout: executablePath } = await run('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', windowsHide: true });
+      const { stdout: commandLine } = await run('ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', windowsHide: true });
+      if (!createdAt.trim() || !executablePath.trim() || !commandLine.trim()) return null;
+      return { pid, createdAt: createdAt.trim(), executablePath: executablePath.trim(), commandLine: commandLine.trim() };
     } catch (error) {
       if (exitStatus(error) === 1) return null;
       throw error;
