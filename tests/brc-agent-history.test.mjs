@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 
@@ -74,6 +74,77 @@ test('simultaneous additions retain their order in the persisted queue', async (
   await toolHistory.cleanup();
   const records = (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(records.map(record => record.toolName), Array.from({ length: 20 }, (_, i) => `parallel-${i}`));
+});
+
+test('history initialization reports lock contention instead of exposing an empty cache', () => {
+  const directory = path.join(root, 'locked-startup');
+  const storage = new ToolHistoryStorage(directory);
+  const moduleUrl = pathToFileURL(path.resolve('packages/agent/dist/core/utils/toolHistory.js')).href;
+  storage.withLock(() => {
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(moduleUrl)})`], {
+      env: { ...process.env, BRC_HOME: directory },
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /lock|ELOCKED/i);
+  });
+});
+
+test('history writes preserve the destination of a symbolic link', async (t) => {
+  const directory = path.join(root, 'linked');
+  await mkdir(directory);
+  const target = path.join(directory, 'target.jsonl');
+  const link = path.join(directory, 'tool-history.jsonl');
+  await writeFile(target, '{"n":1}\n');
+  try {
+    await symlink(target, link, 'file');
+  } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('symbolic links require permission');
+    throw error;
+  }
+  const storage = new ToolHistoryStorage(directory);
+  storage.withLock(() => storage.appendText('{"n":2}\n'));
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.equal(await readFile(target, 'utf8'), '{"n":1}\n{"n":2}\n');
+});
+
+test('rewrites do not widen existing POSIX permissions', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX mode is not a Windows ACL');
+  const storage = new ToolHistoryStorage(path.join(root, 'permissions'));
+  storage.withLock(() => storage.rewriteText('first\n'));
+  await chmod(storage.file, 0o600);
+  storage.withLock(() => storage.appendText('second\n'));
+  assert.equal((await stat(storage.file)).mode & 0o777, 0o600);
+});
+
+test('lock cleanup removes dead writers temporary files without following links', async (t) => {
+  const directory = path.join(root, 'abandoned');
+  const storage = new ToolHistoryStorage(directory);
+  const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  assert.equal(child.status, 0);
+  const deadPid = Number(child.stdout);
+  const suffix = '11111111-1111-4111-8111-111111111111.tmp';
+  const abandoned = `${storage.file}.${deadPid}.${suffix}`;
+  const live = `${storage.file}.${process.pid}.${suffix}`;
+  const unrelated = path.join(directory, 'unrelated.tmp');
+  await writeFile(abandoned, 'private history');
+  await writeFile(live, 'live writer');
+  await writeFile(unrelated, 'unrelated');
+  const linked = `${storage.file}.${deadPid}.22222222-2222-4222-8222-222222222222.tmp`;
+  let linkedCreated = false;
+  try {
+    await symlink(unrelated, linked, 'file');
+    linkedCreated = true;
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    t.diagnostic('symbolic-link check skipped: permission unavailable');
+  }
+  storage.withLock(() => {});
+  await assert.rejects(lstat(abandoned), { code: 'ENOENT' });
+  assert.equal(await readFile(live, 'utf8'), 'live writer');
+  assert.equal(await readFile(unrelated, 'utf8'), 'unrelated');
+  if (linkedCreated) assert.equal((await lstat(linked)).isSymbolicLink(), true);
 });
 
 test('existing filesystem root does not require recursive mkdir', () => {

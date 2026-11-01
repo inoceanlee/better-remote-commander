@@ -89,6 +89,7 @@ class ToolHistory {
     try {
       this.storage.withLock(() => this.loadLocked());
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ELOCKED') throw error;
       // Silently fail
     }
   }
