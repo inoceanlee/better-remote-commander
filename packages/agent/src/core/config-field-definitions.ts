@@ -47,3 +47,26 @@ export const CONFIG_FIELD_KEYS = Object.keys(CONFIG_FIELD_DEFINITIONS) as Config
 export function isConfigFieldKey(value: string): value is ConfigFieldKey {
   return Object.prototype.hasOwnProperty.call(CONFIG_FIELD_DEFINITIONS, value);
 }
+
+export function parseEditableValue(key: ConfigFieldKey, raw: unknown): string | number | boolean | string[] {
+  if (!isConfigFieldKey(key)) throw new Error(`Key "${key}" is not configurable`);
+  const type = CONFIG_FIELD_DEFINITIONS[key].valueType;
+  if (type === 'boolean') {
+    if (raw === true || raw === 'true') return true;
+    if (raw === false || raw === 'false') return false;
+  } else if (type === 'number') {
+    const value = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
+  } else if (type === 'string') {
+    if (typeof raw === 'string' && raw.trim()) return raw;
+  } else if (type === 'array') {
+    let value = raw;
+    if (typeof value === 'string') {
+      const input = value;
+      try { value = JSON.parse(input); }
+      catch { if (!input.includes('[')) value = [input]; }
+    }
+    if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return [...value];
+  }
+  throw new Error(`Invalid value for ${key}`);
+}

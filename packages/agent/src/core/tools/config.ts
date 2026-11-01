@@ -181,70 +181,8 @@ export async function setConfigValue(args: unknown) {
     }
 
     try {
-      const fieldDefinition = CONFIG_FIELD_DEFINITIONS[parsed.data.key];
-      // Parse string values that should be arrays or objects
-      let valueToStore = parsed.data.value;
-      
-      // If the value is a string that looks like an array or object, try to parse it
-      if (typeof valueToStore === 'string' && 
-          (valueToStore.startsWith('[') || valueToStore.startsWith('{'))) {
-        try {
-          valueToStore = JSON.parse(valueToStore);
-          console.error(`Parsed string value to object/array: ${JSON.stringify(valueToStore)}`);
-        } catch (parseError) {
-          console.error(`Failed to parse string as JSON, using as-is: ${parseError}`);
-        }
-      }
-
-      // Special handling for known array configuration keys
-      if (fieldDefinition.valueType === 'array' && !Array.isArray(valueToStore)) {
-        if (typeof valueToStore === 'string') {
-          const originalString = valueToStore;
-          try {
-            const parsedValue = JSON.parse(originalString);
-            valueToStore = parsedValue;
-          } catch (parseError) {
-            console.error(`Failed to parse string as array for ${parsed.data.key}: ${parseError}`);
-            // If parsing failed and it's a single value, convert to an array with one item
-            if (!originalString.includes('[')) {
-              valueToStore = [originalString];
-            }
-          }
-        } else if (valueToStore !== null) {
-          // If not a string or array (and not null), convert to an array with one item
-          valueToStore = [String(valueToStore)];
-        }
-        
-        // Ensure the value is an array after all our conversions
-        if (!Array.isArray(valueToStore)) {
-          console.error(`Value for ${parsed.data.key} is still not an array, converting to array`);
-          valueToStore = [String(valueToStore)];
-        }
-      }
-
-      // Harden boolean fields against stringly-typed inputs like "false".
-      if (fieldDefinition.valueType === 'boolean') {
-        if (typeof valueToStore === 'string') {
-          const normalized = valueToStore.trim().toLowerCase();
-          if (normalized === 'true') {
-            valueToStore = true;
-          } else if (normalized === 'false') {
-            valueToStore = false;
-          }
-        }
-
-        if (typeof valueToStore !== 'boolean') {
-          return {
-            content: [{
-              type: "text",
-              text: `Value for ${parsed.data.key} must be boolean true/false.`
-            }],
-            isError: true
-          };
-        }
-      }
-
-      await configManager.setValue(parsed.data.key, valueToStore);
+      await configManager.setUserSetting(parsed.data.key, parsed.data.value);
+      const valueToStore = await configManager.getValue(parsed.data.key);
       // Get the updated configuration to show the user
       const updatedConfig = await configManager.getConfig();
       console.error(`setConfigValue: Successfully set ${parsed.data.key} to ${JSON.stringify(valueToStore)}`);
@@ -256,11 +194,10 @@ export async function setConfigValue(args: unknown) {
       };
     } catch (saveError: any) {
       console.error(`Error saving config: ${saveError.message}`);
-      // Continue with in-memory change but report error
       return {
         content: [{
-          type: "text", 
-          text: `Value changed in memory but couldn't be saved to disk: ${saveError.message}`
+          type: "text",
+          text: `Could not save configuration: ${saveError.message}`
         }],
         isError: true
       };

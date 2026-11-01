@@ -10,10 +10,11 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { resolveAgentHome } from './core/config.js';
 
 const NAME = 'brc-agent';
 const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
-const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
+const home = () => resolveAgentHome(process.env);
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe', windowsHide: true }).toString();
 
 export function installService(extraArgs: string[]): string {

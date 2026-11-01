@@ -1,10 +1,12 @@
-import fs from 'fs/promises';
-import path from 'path';
-import { existsSync, watch, type FSWatcher } from 'fs';
-import { mkdir } from 'fs/promises';
+import type { FSWatcher } from 'fs';
 import os from 'os';
-import lockfile from 'proper-lockfile';
-import { CONFIG_FILE } from './config.js';
+import { AGENT_DEFAULTS, CONFIG_FILE } from './config.js';
+import { ConfigStorage } from './config-storage.js';
+import { parseEditableValue, type ConfigFieldKey } from './config-field-definitions.js';
+
+function clone<T>(value: T): T {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
 
 export interface ServerConfig {
   blockedCommands?: string[];
@@ -48,7 +50,7 @@ export function isTelemetryDisabledValue(value: unknown): boolean {
  * Singleton config manager for the server
  */
 class ConfigManager {
-  private configPath: string;
+  private storage = new ConfigStorage(CONFIG_FILE);
   private config: ServerConfig = {};
   private initialized = false;
   private _isFirstRun = false; // Track if this is the first run (config was just created)
@@ -60,11 +62,6 @@ class ConfigManager {
   private watcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
-    // Get user's home directory
-    // Define config directory and file paths
-    this.configPath = CONFIG_FILE;
-  }
 
   /**
    * Initialize configuration - load from disk or create default.
@@ -74,45 +71,37 @@ class ConfigManager {
   async init() {
     if (this.initialized) return;
 
+    await this.storage.prepare();
+    let exists = true;
     try {
-      const configDir = path.dirname(this.configPath);
-      if (!existsSync(configDir)) {
-        await mkdir(configDir, { recursive: true });
-      }
-
-      try {
-        this.config = await this.readConfigFromDisk();
-        this._isFirstRun = false;
-
-        if (this.config['welcomeOnboardingEligible'] === undefined) {
-          await this.performConfigMutation((latest) => {
-            if (latest['welcomeOnboardingEligible'] === undefined) {
-              latest['welcomeOnboardingEligible'] = false;
-              latest['pendingWelcomeOnboarding'] = false;
-            }
-          });
+      this.config = await this.storage.read();
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      exists = false;
+    }
+    if (!exists) {
+      let created = false;
+      await this.performConfigMutation((latest, existed) => {
+        if (!existed) {
+          Object.assign(latest, this.getDefaultConfig());
+          created = true;
         }
-      } catch (error: any) {
-        if (error?.code !== 'ENOENT') throw error;
-        let created = false;
-        await this.performConfigMutation((latest, existed) => {
-          if (!existed) {
-            Object.assign(latest, this.getDefaultConfig());
-            created = true;
+      });
+      this._isFirstRun = created;
+    } else {
+      this._isFirstRun = false;
+      if (this.config['welcomeOnboardingEligible'] === undefined) {
+        await this.performConfigMutation((latest) => {
+          if (latest['welcomeOnboardingEligible'] === undefined) {
+            latest['welcomeOnboardingEligible'] = false;
+            latest['pendingWelcomeOnboarding'] = false;
           }
         });
-        this._isFirstRun = created;
       }
-
-      delete this.config.version;
-      this.initialized = true;
-      this.startConfigWatcher();
-    } catch (error) {
-      console.error('Failed to initialize config:', error);
-      this.config = this.getDefaultConfig();
-      this.initialized = true;
-      this.startConfigWatcher();
     }
+    delete this.config.version;
+    this.initialized = true;
+    this.startConfigWatcher();
   }
 
   /**
@@ -186,65 +175,31 @@ class ConfigManager {
       })(),
       allowedDirectories: [],
       telemetryEnabled: false, // Better Remote Commander (BRC): off by default
-      fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
-      fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      fileWriteLineLimit: AGENT_DEFAULTS.fileWriteLineLimit,
+      fileReadLineLimit: AGENT_DEFAULTS.fileReadLineLimit,
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
       welcomeOnboardingEligible: true // Distinguishes new installs from migrated legacy configs
     };
   }
 
-  private async readConfigFromDisk(): Promise<ServerConfig> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        return JSON.parse(await fs.readFile(this.configPath, 'utf8'));
-      } catch (error: any) {
-        lastError = error;
-        if (error?.code === 'ENOENT') throw error;
-        if (!(error instanceof SyntaxError) || attempt === 4) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    throw lastError;
-  }
-
-  private async writeConfigAtomically(config: ServerConfig): Promise<void> {
-    const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-    try {
-      await fs.writeFile(tempPath, JSON.stringify(config, null, 2), 'utf8');
-      await fs.rename(tempPath, this.configPath);
-    } finally {
-      await fs.unlink(tempPath).catch(() => {});
-    }
-  }
-
-  private async acquireConfigLock(): Promise<() => Promise<void>> {
-    return lockfile.lock(this.configPath, {
-      realpath: false,
-      stale: 30_000,
-      update: 10_000,
-      retries: { retries: 100, factor: 1.2, minTimeout: 10, maxTimeout: 100 }
-    });
-  }
-
   private async performConfigMutation(
     mutate: (config: ServerConfig, existed: boolean) => void
   ): Promise<ServerConfig> {
-    const release = await this.acquireConfigLock();
+    const release = await this.storage.lock();
     try {
       let latest: ServerConfig;
       let existed = true;
       try {
-        latest = await this.readConfigFromDisk();
+        latest = await this.storage.read();
       } catch (error: any) {
         if (error?.code !== 'ENOENT') throw error;
         latest = {};
         existed = false;
       }
       mutate(latest, existed);
-      await this.writeConfigAtomically(latest);
+      await this.storage.write(latest);
       delete latest.version;
-      this.config = { ...latest };
+      this.config = clone(latest);
       return latest;
     } finally {
       try {
@@ -288,11 +243,8 @@ class ConfigManager {
   private startConfigWatcher(): void {
     if (this.watcher) return;
     try {
-      const dir = path.dirname(this.configPath);
-      const filename = path.basename(this.configPath);
-      this.watcher = watch(dir, { persistent: false }, (_event, changed) => {
-        if (changed && changed.toString() !== filename) return;
-        if (this.reloadTimer) clearTimeout(this.reloadTimer);
+      this.watcher = this.storage.watch(() => {
+        clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => void this.reloadConfigFromDisk(), 20);
       });
       this.watcher.on('error', (error) => console.error('Config watcher error:', error));
@@ -303,7 +255,7 @@ class ConfigManager {
 
   private async reloadConfigFromDisk(): Promise<void> {
     try {
-      const latest = await this.readConfigFromDisk();
+      const latest = await this.storage.read();
       for (const mutate of this.pendingMutations) mutate(latest);
       delete latest.version;
       this.config = latest;
@@ -317,7 +269,7 @@ class ConfigManager {
    */
   async getConfig(): Promise<ServerConfig> {
     await this.init();
-    return { ...this.config };
+    return clone(this.config);
   }
 
   /**
@@ -325,7 +277,11 @@ class ConfigManager {
    */
   async getValue(key: string): Promise<any> {
     await this.init();
-    return this.config[key];
+    return clone(this.config[key]);
+  }
+
+  async setUserSetting(key: ConfigFieldKey, raw: unknown): Promise<void> {
+    await this.setValue(key, parseEditableValue(key, raw));
   }
 
   /** Set a specific configuration value and wait for durable persistence. */
@@ -341,7 +297,7 @@ class ConfigManager {
       }
     }
 
-    const nextValue = value;
+    const nextValue = clone(value);
     const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
       latest[key] = nextValue;
     }));
@@ -354,12 +310,12 @@ class ConfigManager {
     await this.init();
     let updatedValue: any;
     const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
-      updatedValue = updater(latest[key]);
-      latest[key] = updatedValue;
+      updatedValue = updater(clone(latest[key]));
+      latest[key] = clone(updatedValue);
     }));
     this.writeChain = write.then(() => {}, () => {});
     await write;
-    return updatedValue;
+    return clone(updatedValue);
   }
 
   /**
@@ -368,8 +324,9 @@ class ConfigManager {
    */
   async setValueNonBlocking(key: string, value: any): Promise<void> {
     await this.init();
-    this.config[key] = value;
-    this.queueMutation((latest) => { latest[key] = value; });
+    const nextValue = clone(value);
+    this.config[key] = nextValue;
+    this.queueMutation((latest) => { latest[key] = nextValue; });
   }
 
   /**
@@ -379,20 +336,21 @@ class ConfigManager {
    */
   async updateValueNonBlocking(key: string, updater: (current: any) => any): Promise<any> {
     await this.init();
-    const next = updater(this.config[key]);
-    this.config[key] = next;
-    this.queueMutation((latest) => { latest[key] = updater(latest[key]); });
-    return next;
+    const next = updater(clone(this.config[key]));
+    this.config[key] = clone(next);
+    this.queueMutation((latest) => { latest[key] = updater(clone(latest[key])); });
+    return clone(next);
   }
 
   /** Update multiple configuration values at once. */
   async updateConfig(updates: Partial<ServerConfig>): Promise<ServerConfig> {
     await this.init();
+    const safeUpdates = clone(updates);
     const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
-      Object.assign(latest, updates);
+      Object.assign(latest, safeUpdates);
     }));
     this.writeChain = write.then(() => {}, () => {});
-    return { ...(await write) };
+    return clone(await write);
   }
 
   /** Reset configuration to defaults. This intentionally replaces all keys. */
@@ -404,7 +362,7 @@ class ConfigManager {
       Object.assign(latest, defaults);
     }));
     this.writeChain = write.then(() => {}, () => {});
-    return { ...(await write) };
+    return clone(await write);
   }
 
   /**
