@@ -55,7 +55,8 @@ function classifyFile(relativePath, absolutePath, exportedTargets, referencedMap
   if (basename === 'package.json' || isLicenseFile(basename) || isExportedFile(normalized, exportedTargets)) return null;
   if (categoryRules.testDirectories.test(normalized)) return 'tests';
   if (categoryRules.exampleDirectories.test(normalized)) return 'examples';
-  if (categoryRules.documentationDirectories.test(normalized) || categoryRules.documentationFiles.test(basename)) {
+  if (categoryRules.documentationDirectories.test(normalized)
+      || (!normalized.includes('/') && categoryRules.documentationFiles.test(basename))) {
     return 'documentation';
   }
   if (categoryRules.sourceMaps.test(basename)) {
