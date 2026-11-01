@@ -114,6 +114,37 @@ test('corrupt JSON and read or lock errors do not initialize writable defaults',
   }
 });
 
+test('Windows deny-read ACL prevents configuration fallback', { skip: process.platform !== 'win32' }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'brc-agent-acl-'));
+  const filename = path.join(dir, 'config.json');
+  const original = '{"defaultShell":"preserved"}';
+  await writeFile(filename, original);
+  const identity = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(identity.status, 0, identity.stderr);
+  const sid = identity.stdout.trim();
+  assert.match(sid, /^S-1-/);
+  const permission = (operation) => spawnSync('icacls.exe', [filename, operation, '*' + sid + (operation === '/deny' ? ':(R)' : '')], { encoding: 'utf8', windowsHide: true });
+  const denied = permission('/deny');
+  assert.equal(denied.status, 0, denied.stderr);
+  try {
+    const managerUrl = pathToFileURL(path.resolve('packages/agent/dist/core/config-manager.js')).href;
+    const source = `import assert from 'node:assert/strict';
+      const { configManager } = await import(${JSON.stringify(managerUrl)});
+      const isDenied = (error) => ['EACCES', 'EPERM'].includes(error.code);
+      await assert.rejects(configManager.init(), isDenied);
+      await assert.rejects(configManager.setValue('defaultShell', 'changed'), isDenied);`;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: process.cwd(), env: { ...process.env, BRC_HOME: dir }, encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(child.status, 0, child.stderr);
+  } finally {
+    const restored = permission('/remove:d');
+    assert.equal(restored.status, 0, restored.stderr);
+  }
+  assert.equal(await readFile(filename, 'utf8'), original);
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('non-object config roots reject initialization and tool updates', async (t) => {
   const managerUrl = pathToFileURL(path.resolve('packages/agent/dist/core/config-manager.js')).href;
   const dispatcherUrl = pathToFileURL(path.resolve('packages/agent/dist/dispatcher.js')).href;
