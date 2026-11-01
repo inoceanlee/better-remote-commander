@@ -95,9 +95,9 @@ test('OAuth rejects authorization codes, access tokens, refresh tokens, and API 
     const insertToken = db.prepare('INSERT INTO tokens VALUES (?,?,?,?,?,?,?,?,?)');
     insertToken.run(sha256('stale-access'), 'access', 'client', 'missing-user', 'mcp:tools', null, now + 60_000, now, 0);
     insertToken.run(sha256('stale-refresh'), 'refresh', 'client', 'missing-user', 'mcp:tools', null, now + 60_000, now, 0);
-    const apiKey = 'stale-api-key';
+    const apiKey = 'brc_ak_stale-api-key';
     db.prepare('INSERT INTO api_keys (key_hash,user_id,name,prefix,created_at) VALUES (?,?,?,?,?)')
-      .run(sha256(apiKey), 'missing-user', 'stale key', 'stale', now);
+      .run(sha256(apiKey), 'missing-user', 'stale key', apiKey.slice(0, 18), now);
     db.close();
     const provider = new RelayOAuthProvider({
       store: s,

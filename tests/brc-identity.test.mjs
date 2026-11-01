@@ -139,6 +139,7 @@ test('legacy Relay database migration preserves identity and adds restricted use
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
     assert.throws(() => db.prepare('DELETE FROM users WHERE id = ?').run('admin-id'), /FOREIGN KEY constraint failed/);
+    assert.throws(() => store.issueDeviceToken('orphan', 'missing-user', 'Agent', 'win32'), /FOREIGN KEY constraint failed/);
     assert.doesNotThrow(() => db.prepare('INSERT INTO device_codes VALUES (?,?,?,?,?,?,?,?,?)').run('new-pending', 'EEEE-FFFF', 'Agent', null, 0, 0, null, Date.now() + 60_000, 1));
   } finally {
     db.close();
