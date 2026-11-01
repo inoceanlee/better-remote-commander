@@ -17,6 +17,7 @@ import { ServerResult } from '../types.js';
 import { withTimeout } from '../utils/withTimeout.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { configManager } from '../config-manager.js';
+import { AGENT_DEFAULTS } from '../config.js';
 
 import {
     ReadFileArgsSchema,
@@ -90,7 +91,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
             return createErrorResponse('Configuration not available');
         }
 
-        const defaultLimit = config.fileReadLineLimit ?? 1000;
+        const defaultLimit = config.fileReadLineLimit ?? AGENT_DEFAULTS.fileReadLineLimit;
 
         // Convert sheet parameter: numeric strings become numbers for Excel index access
         let sheetParam: string | number | undefined = parsed.sheet;
@@ -333,7 +334,7 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
 
         // Get the line limit from configuration
         const config = await configManager.getConfig();
-        const MAX_LINES = config.fileWriteLineLimit ?? 50; // Default to 50 if not set
+        const MAX_LINES = config.fileWriteLineLimit ?? AGENT_DEFAULTS.fileWriteLineLimit;
 
         // Strictly enforce line count limit
         const lines = parsed.content.split('\n');
