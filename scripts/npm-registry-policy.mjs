@@ -7,3 +7,12 @@ export function registryRepublishAt(output, now = Date.now()) {
   const deadline = unpublishedAt + 24 * 60 * 60 * 1000;
   return now < deadline ? new Date(deadline).toISOString() : null;
 }
+
+export function assertRegistryIntegrity(artifact, metadata) {
+  if (metadata?.name !== artifact.name || metadata?.version !== artifact.version) {
+    throw new Error('Registry package identity does not match the release artifact.');
+  }
+  if (metadata?.dist?.integrity !== artifact.integrity) {
+    throw new Error('Registry dist.integrity does not match the release archive SHA-512.');
+  }
+}

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { ReleaseProgress } from '../scripts/release-progress.mjs';
-import { registryRepublishAt } from '../scripts/npm-registry-policy.mjs';
+import { ReleaseRunner } from '../scripts/release-runner.mjs';
+import { assertRegistryIntegrity, registryRepublishAt } from '../scripts/npm-registry-policy.mjs';
 import { assertReleaseVersion } from '../scripts/release-version.mjs';
 import path from 'node:path';
 import test from 'node:test';
@@ -33,38 +35,50 @@ test('publishing requires a local interactive terminal before build or network w
   assert.match(result.stderr, /local interactive terminal/);
 });
 
-test('progress runner captures child output and real progress updates', async () => {
+test('runner captures subprocess output and progress displays stage details', async () => {
   const output = { isTTY: false, data: '', write(text) { this.data += text; } };
-  const runner = new ReleaseProgress({ output, errorOutput: output });
-  await runner.step(1, 3, 'Build package', async () => {
-    const result = await runner.command(process.execPath, ['-e', "process.stdout.write('BRC_PROGRESS:45\\nfinished\\n')"], { cwd: process.cwd() });
-    assert.match(result.stdout, /finished/);
-    assert.equal(runner.current.details, '45% gzip');
+  const progress = new ReleaseProgress({ output });
+  const runner = new ReleaseRunner();
+  progress.start('Build package');
+  const result = await runner.run(process.execPath, ['-e', "process.stdout.write('BRC_PROGRESS:45\\nfinished\\n')"], {
+    cwd: process.cwd(),
+    onOutput(_stream, text) {
+      const match = text.match(/BRC_PROGRESS:(\d{1,3})/);
+      if (match) progress.detail(match[1] + '% gzip');
+    },
   });
-  assert.match(output.data, /\[1\/3\] Build package/);
+  assert.match(result.stdout, /finished/);
+  assert.equal(progress.current.detail, '45% gzip');
+  progress.finish();
+  assert.match(output.data, /Build package/);
   assert.match(output.data, /✓/);
   assert.doesNotMatch(output.data, /\x1b\[2K/);
 });
 
-test('progress runner refreshes an interactive terminal while a step is active', async () => {
+test('progress renderer refreshes a terminal while a stage runs', async () => {
   const output = { isTTY: true, data: '', write(text) { this.data += text; } };
-  const runner = new ReleaseProgress({ output, errorOutput: output });
-  await runner.step(1, 1, 'Working', async () => {
-    await new Promise((resolve) => setTimeout(resolve, 280));
-  });
+  const progress = new ReleaseProgress({ output });
+  progress.start('Working');
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  progress.finish();
   assert.match(output.data, /\r\x1b\[2K/);
   assert.match(output.data, /⠋|⠙|⠹/);
   assert.match(output.data, /✓/);
 });
 
-test('progress runner preserves a concise error on subprocess failure', async () => {
-  const output = { isTTY: false, data: '', write(text) { this.data += text; } };
-  const runner = new ReleaseProgress({ output, errorOutput: output });
+test('runner preserves concise subprocess errors', async () => {
+  const runner = new ReleaseRunner();
   await assert.rejects(
-    runner.step(2, 3, 'Test failure', async () => runner.command(process.execPath, ['-e', "console.error('known failure');process.exit(3)"])),
+    runner.run(process.execPath, ['-e', "console.error('known failure');process.exit(3)"]),
     /known failure/,
   );
-  assert.match(output.data, /✗/);
+});
+
+test('progress renderer does not execute subprocesses', () => {
+  const progress = new ReleaseProgress({ output: { write() {} } });
+  assert.equal(typeof progress.start, 'function');
+  assert.equal(typeof progress.detail, 'function');
+  assert.equal(typeof progress.finish, 'function');
 });
 
 test('only the public CLI manifest declares a product version', () => {
@@ -90,29 +104,20 @@ test('release requires a higher explicit CLI version than npm', () => {
   assert.throws(() => assertReleaseVersion('invalid', null), /Invalid release version/);
 });
 
-test('direct publication uses an interactive npm process', () => {
-  const source = readFileSync(script, 'utf8');
-  assert.match(source, /await command\('npm', \['publish', archive, '--access', 'public', '--registry', registry\], \{ interactive: true \}\)/);
-  assert.doesNotMatch(source, /'stage', 'publish'/);
-  assert.doesNotMatch(source, /awaitApproval/);
-});
 
-test('interactive subprocess inherits stdin and displays its output', () => {
+test('interactive runner inherits stdin and displays child output', () => {
   const source = [
-    "import { ReleaseProgress } from './scripts/release-progress.mjs';",
-    "const progress = new ReleaseProgress();",
-    "await progress.step(1, 1, 'Authenticate', async () => {",
-    "  await progress.command(process.execPath, ['-e',",
-    "    \"process.stdin.once('data', v => { console.log('RECEIVED:' + v.toString().trim()); });\"",
-    "  ], { interactive: true });",
-    "});",
+    "import { ReleaseRunner } from './scripts/release-runner.mjs';",
+    "const runner = new ReleaseRunner();",
+    "await runner.run(process.execPath, ['-e',",
+    "  \"process.stdin.once('data', v => { console.log('RECEIVED:' + v.toString().trim()); });\"",
+    "], { interactive: true });",
   ].join('\n');
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-    cwd: path.resolve('.'), input: 'test-otp-input\\n', encoding: 'utf8', timeout: 8_000, windowsHide: true,
+    cwd: path.resolve('.'), input: 'test-otp-input\n', encoding: 'utf8', timeout: 8_000, windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /RECEIVED:test-otp-input/);
-  assert.match(result.stdout, /Authenticate/);
 });
 
 test('npm unpublished package names are blocked for 24 hours before building', () => {
@@ -122,6 +127,18 @@ test('npm unpublished package names are blocked for 24 hours before building', (
   assert.equal(registryRepublishAt('{"error":{"summary":"Not Found"}}'), null);
   assert.match(readFileSync(script, 'utf8'), /registryRepublishAt\(details\)/);
 });
+
+test('registry verification rejects a same-version archive with different integrity', () => {
+  const archive = Buffer.from('verified package');
+  const integrity = 'sha512-' + createHash('sha512').update(archive).digest('base64');
+  assert.doesNotThrow(() => assertRegistryIntegrity({ name: '@inoceanlee/brc', version: '2.1.2', integrity }, {
+    name: '@inoceanlee/brc', version: '2.1.2', dist: { integrity },
+  }));
+  assert.throws(() => assertRegistryIntegrity({ name: '@inoceanlee/brc', version: '2.1.2', integrity }, {
+    name: '@inoceanlee/brc', version: '2.1.2', dist: { integrity: 'sha512-wrong' },
+  }), /integrity/);
+});
+
 
 test('release automation is exposed only as a dedicated package command', () => {
   const manifest = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));

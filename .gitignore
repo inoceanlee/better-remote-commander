@@ -6,4 +6,5 @@ dist/
 data/
 dist-pack/
 native/**/target/
+artifacts/releases/
 tools/
