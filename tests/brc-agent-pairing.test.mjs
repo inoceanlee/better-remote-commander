@@ -116,11 +116,17 @@ test('agent saves newly approved credentials once when a relay rejects its old t
   let heldSocket;
   const reconnected = new Promise((resolve) => { resolveReconnected = resolve; });
   let upgrades = 0;
+  const socketErrors = [];
   const server = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/device/start') return res.end(JSON.stringify({ ...start, expires_in: 30 }));
     if (req.url === '/device/poll') return res.end(JSON.stringify({ device_token: 'new-token', device_id: 'old-id' }));
     res.writeHead(404).end('{}');
+  });
+  server.on('connection', (socket) => {
+    socket.on('error', (error) => {
+      if (error.code !== 'ECONNRESET') socketErrors.push(error);
+    });
   });
   server.on('upgrade', (req, socket) => {
     if (++upgrades === 1) {
@@ -152,6 +158,7 @@ test('agent saves newly approved credentials once when a relay rejects its old t
     heldSocket?.destroy();
     await new Promise((resolve) => server.close(resolve));
     rmSync(root, { recursive: true, force: true });
+    assert.deepEqual(socketErrors, []);
   });
   let timeout;
   try {
