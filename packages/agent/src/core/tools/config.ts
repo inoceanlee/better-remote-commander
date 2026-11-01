@@ -142,12 +142,12 @@ export async function getConfig() {
   } catch (error) {
     console.error(`Error in getConfig: ${error instanceof Error ? error.message : String(error)}`);
     console.error(error instanceof Error && error.stack ? error.stack : 'No stack trace available');
-    // Return empty config rather than crashing
     return {
       content: [{
         type: "text",
-        text: `Error getting configuration: ${error instanceof Error ? error.message : String(error)}\nUsing empty configuration.`
+        text: `Error getting configuration: ${error instanceof Error ? error.message : String(error)}`
       }],
+      isError: true,
     };
   }
 }

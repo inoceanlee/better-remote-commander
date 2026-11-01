@@ -244,7 +244,7 @@ class ConfigManager {
     if (this.watcher) return;
     try {
       this.watcher = this.storage.watch(() => {
-        clearTimeout(this.reloadTimer);
+        clearTimeout(this.reloadTimer ?? undefined);
         this.reloadTimer = setTimeout(() => void this.reloadConfigFromDisk(), 20);
       });
       this.watcher.on('error', (error) => console.error('Config watcher error:', error));

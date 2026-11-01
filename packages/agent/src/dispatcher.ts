@@ -62,11 +62,11 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   }
   try {
     const result = (await handler(args ?? {})) as ToolResult;
-    if (!result.isError) void usageTracker.trackSuccess(name);
-    else void usageTracker.trackFailure(name);
+    const tracking = result.isError ? usageTracker.trackFailure(name) : usageTracker.trackSuccess(name);
+    void tracking.catch((error: unknown) => console.error('Failed to track tool usage:', error));
     return result;
   } catch (err) {
-    void usageTracker.trackFailure(name);
+    void usageTracker.trackFailure(name).catch((error: unknown) => console.error('Failed to track tool usage:', error));
     const message = err instanceof Error ? err.message : String(err);
     return { content: [{ type: 'text', text: `Error in ${name}: ${message}` }], isError: true };
   }

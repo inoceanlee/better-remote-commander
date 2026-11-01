@@ -7,7 +7,7 @@ export const USER_HOME = os.homedir();
 // Better Remote Commander (BRC): own config dir so we never collide with an installed Desktop Commander
 const longPath = (p: string): string => { try { return fs.realpathSync.native(p); } catch { const parent = path.dirname(p); return parent === p ? p : path.join(longPath(parent), path.basename(p)); } };
 export function resolveAgentHome(env: NodeJS.ProcessEnv): string {
-  return longPath(path.resolve(env.BRC_HOME ?? path.join(USER_HOME, '.brc')));
+  return longPath(env.BRC_HOME ?? path.join(USER_HOME, '.brc'));
 }
 export const AGENT_DEFAULTS = { fileReadLineLimit: 1000, fileWriteLineLimit: 50 } as const;
 export const CONFIG_DIR = resolveAgentHome(process.env);

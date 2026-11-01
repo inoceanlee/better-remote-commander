@@ -15,7 +15,11 @@ export class ConfigStorage {
   async read(): Promise<ServerConfig> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return JSON.parse(await fs.readFile(this.configPath, 'utf8'));
+        const value: unknown = JSON.parse(await fs.readFile(this.configPath, 'utf8'));
+        if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+          throw new Error('Agent configuration must be a JSON object');
+        }
+        return value as ServerConfig;
       } catch (error) {
         if (!(error instanceof SyntaxError) || attempt === 4) throw error;
         await delay(10);
