@@ -110,6 +110,10 @@ test('pruning removes non-runtime dependency files and preserves runtime assets'
   await createFile(packageRoot, 'NOTICE.txt', 'notice text');
   await createFile(packageRoot, 'README.md', 'dependency documentation');
   await createFile(packageRoot, 'docs/usage.md', 'dependency documentation');
+  await createFile(packageRoot, 'lib/doc/workbook.js', 'runtime ExcelJS workbook');
+  await createFile(packageRoot, 'lib/docs/template.md', 'nested runtime documentation asset');
+  await createFile(packageRoot, 'lib/tests/driver.js', 'nested runtime test driver');
+  await createFile(packageRoot, 'lib/example/transform.js', 'nested runtime utility');
   await createFile(packageRoot, 'tests/case.js', 'test code');
   await createFile(packageRoot, 'tests/runtime.js', 'export const runtime = true;');
   await createFile(packageRoot, 'examples/demo.js', 'example code');
@@ -135,6 +139,7 @@ test('pruning removes non-runtime dependency files and preserves runtime assets'
   for (const relativePath of [
     'index.js.map', 'types.d.ts', 'features/item.ts', 'tests/runtime.js', 'LICENSE', 'NOTICE.txt',
     'assets/image.png', 'assets/document.pdf', 'assets/spreadsheet.xlsx', 'assets/runtime-template.md',
+    'lib/doc/workbook.js', 'lib/docs/template.md', 'lib/tests/driver.js', 'lib/example/transform.js',
   ]) {
     await stat(path.join(packageRoot, relativePath));
   }
