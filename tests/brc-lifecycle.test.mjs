@@ -499,7 +499,13 @@ test('serializes lifecycle calls across manager instances sharing one runtime ro
   const results = await Promise.allSettled([firstRun, secondRun]);
 
   assert.equal(processes.maxActive, 1);
-  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 2);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 2,
+    results.filter((result) => result.status === 'rejected').map((result) => {
+      const errors = [];
+      let error = result.reason;
+      while (error) { errors.push(error.stack ?? String(error)); error = error.cause; }
+      return errors.join(' CAUSE: ');
+    }).join('\n'));
   assert.equal(results.filter((result) => result.status === 'rejected').length, 0);
 });
 
