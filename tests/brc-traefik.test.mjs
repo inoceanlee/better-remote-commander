@@ -18,6 +18,8 @@ import { SettingsManager } from '../packages/cli/dist/config/manager.js';
 import { TraefikManager } from '../packages/cli/dist/traefik/manager.js';
 import { waitForConfigGeneration } from '../packages/cli/dist/traefik/runtime.js';
 import { renderConfig } from '../packages/cli/dist/traefik/core.js';
+import { TraefikInput } from '../packages/cli/dist/traefik/input.js';
+import { TraefikOutput } from '../packages/cli/dist/traefik/output.js';
 
 const API_URL = 'https://api.github.com/repos/traefik/traefik/releases/latest';
 const TEST_BINARY = process.env.BRC_TRAEFIK_TEST_BINARY;
@@ -355,8 +357,8 @@ test('missing deployment templates leave the installed version and both configur
   const { TraefikManager: IsolatedManager } = await import(pathToFileURL(path.join(isolatedPackage, 'dist', 'traefik', 'manager.js')).href);
   const manager = new IsolatedManager(brcPaths, settingsFor(), makeLifecycle(), {
     fetch: release.fetch,
-    verifyExecutable: async () => {},
-    healthCheck: async () => {},
+    verifyExecutable: async () => { },
+    healthCheck: async () => { },
   });
   await assert.rejects(manager.writeConfig(), /templates are missing/i);
   assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
@@ -454,8 +456,8 @@ test('config changes write Traefik limits under the shared lifecycle lock', asyn
   const { root, paths: brcPaths } = await makeRoot(t);
   const lifecycleLock = new LifecycleLock(brcPaths);
   const serviceManager = new ServiceManager(brcPaths, [], {
-    start: async () => {},
-    stop: async () => {},
+    start: async () => { },
+    stop: async () => { },
     status: async () => ({ name: 'traefik', state: 'stopped', pid: null, detail: 'stopped' }),
   }, lifecycleLock);
   const traefikManager = new TraefikManager(brcPaths, DEFAULT_SETTINGS, serviceManager);
@@ -474,15 +476,15 @@ test('Traefik writes the latest settings while holding the shared lifecycle lock
   const { paths: brcPaths } = await makeRoot(t);
   const lifecycleLock = new LifecycleLock(brcPaths);
   const serviceManager = new ServiceManager(brcPaths, [], {
-    start: async () => {},
-    stop: async () => {},
+    start: async () => { },
+    stop: async () => { },
     status: async () => ({ name: 'traefik', state: 'stopped', pid: null, detail: 'stopped' }),
   }, lifecycleLock);
   const latest = structuredClone(DEFAULT_SETTINGS);
   latest.proxy.rate.average = 23;
   const manager = new TraefikManager(brcPaths, DEFAULT_SETTINGS, serviceManager, {
     loadSettings: async () => {
-      await assert.rejects(lifecycleLock.runExclusive(async () => {}), /cannot be acquired recursively/i);
+      await assert.rejects(lifecycleLock.runExclusive(async () => { }), /cannot be acquired recursively/i);
       return latest;
     },
   });
@@ -927,6 +929,41 @@ test('official Traefik routes all paths and shares global rate and in-flight lim
   assert.equal(await httpStatus(proxyPort, '/oauth%2Fcallback'), 400);
   assert.equal(await httpStatus(proxyPort, '/mcp', { headers: { 'X.Auth.User': 'spoofed' } }), 400);
   assert.equal(webSockets, 0);
+});
+
+test('Traefik input, processing, and output keep isolated responsibilities', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const downloadBytes = [];
+  const input = new TraefikInput({
+    fetch: async () => new Response(new ReadableStream({
+      start(controller) {
+        const half = Math.floor(release.archive.length / 2);
+        controller.enqueue(release.archive.subarray(0, half));
+        controller.enqueue(release.archive.subarray(half));
+        controller.close();
+      },
+    }), { headers: { 'content-length': String(release.archive.length) } }),
+  });
+
+  const archive = await input.downloadArchive(
+    { version: '3.7.16', archiveName: 'traefik_v3.7.16_windows_amd64.zip', archiveUrl: 'https://example.test/archive.zip', checksumUrl: '' },
+    (completedBytes, totalBytes) => downloadBytes.push([completedBytes, totalBytes]),
+  );
+  assert.ok(archive instanceof Uint8Array);
+  assert.deepEqual(downloadBytes, [
+    [Math.floor(release.archive.length / 2), release.archive.length],
+    [release.archive.length, release.archive.length],
+  ]);
+  assert.deepEqual(await (await import('node:fs/promises')).readdir(brcPaths.root), []);
+
+  const { processArchive } = await import('../packages/cli/dist/traefik/core.js');
+  const executable = await processArchive(archive, createHash('sha256').update(release.archive).digest('hex'));
+  assert.equal(executable.path, 'traefik.exe');
+  assert.deepEqual(await (await import('node:fs/promises')).readdir(brcPaths.root), []);
+
+  const stage = await new TraefikOutput(brcPaths).stageArchive({ version: '3.7.16' }, executable);
+  assert.equal(await readFile(path.join(stage, 'traefik.exe'), 'utf8'), 'binary-3.7.16');
 });
 
 test('setup emits streamed download bytes and verifies before staging', async (t) => {
