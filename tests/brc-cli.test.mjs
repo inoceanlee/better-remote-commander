@@ -430,9 +430,15 @@ test('backpressure flushes the final clear after drain', async () => {
   const progress = new TraefikProgress(output);
   progress.report({ operation: 'setup', stage: 'download', status: 'started' });
   const stopping = progress.stopAndWait();
+  progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 80, totalBytes: 100 });
+  progress.report({ operation: 'setup', stage: 'health', status: 'started' });
   output.emit('drain');
   await stopping;
   assert.ok(output.text.endsWith('\r\x1b[2K'));
+  const text = output.text;
+  progress.report({ operation: 'setup', stage: 'download', status: 'started', completedBytes: 100, totalBytes: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(output.text, text);
 });
 
 test('interrupt cleanup is bounded when a blocked stream never drains', async () => {
@@ -471,4 +477,48 @@ test('backpressure retains the latest progress frame until drain', async () => {
   output.emit('drain');
   assert.match(output.text, /50%/);
   progress.stop();
+});
+
+test('non-TTY stages remain ordered across backpressure and drain', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  class Output extends EventEmitter {
+    isTTY = false;
+    text = '';
+    write(text, callback) {
+      const first = this.text.length === 0;
+      this.text += text;
+      queueMicrotask(() => callback?.());
+      return !first;
+    }
+  }
+  const output = new Output();
+  const progress = new TraefikProgress(output);
+  for (const stage of ['release', 'download', 'verify', 'stage', 'health']) {
+    progress.report({ operation: 'setup', stage, status: 'started' });
+    progress.report({ operation: 'setup', stage, status: 'completed' });
+  }
+  output.emit('drain');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(output.text.trim().split('\n'), [
+    'Traefik setup: release', 'Traefik setup: download', 'Traefik setup: verify',
+    'Traefik setup: stage', 'Traefik setup: health',
+  ]);
+  assert.doesNotMatch(output.text, /\x1b|\r/);
+});
+
+test('non-TTY output error during backpressure permits interrupt cleanup', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { TraefikProgress } = await import('../packages/cli/dist/progress.js');
+  class Output extends EventEmitter {
+    isTTY = false;
+    write(_text, callback) { queueMicrotask(() => callback?.()); return false; }
+  }
+  const output = new Output();
+  const progress = new TraefikProgress(output);
+  progress.report({ operation: 'setup', stage: 'release', status: 'started' });
+  progress.report({ operation: 'setup', stage: 'download', status: 'started' });
+  const stopping = progress.stopAndWait();
+  output.emit('error', Object.assign(new Error('closed'), { code: 'EPIPE' }));
+  await stopping;
 });
