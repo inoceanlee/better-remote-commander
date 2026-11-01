@@ -109,25 +109,19 @@ function buildPermissionError(filePath: string, errCode: string | undefined): Er
 
 // Initialize allowed directories from configuration
 async function getAllowedDirs(): Promise<string[]> {
-    try {
-        let allowedDirectories;
-        const config = await configManager.getConfig();
-        if (config.allowedDirectories && Array.isArray(config.allowedDirectories)) {
-            allowedDirectories = config.allowedDirectories;
-        } else {
-            // Fall back to default directories if not configured
-            allowedDirectories = [
-                os.homedir()   // User's home directory
-            ];
-            // Update config with default
-            await configManager.setValue('allowedDirectories', allowedDirectories);
-        }
-        return allowedDirectories;
-    } catch (error) {
-        console.error('Failed to initialize allowed directories:', error);
-        // Keep the default permissive path
+    let allowedDirectories;
+    const config = await configManager.getConfig();
+    if (config.allowedDirectories && Array.isArray(config.allowedDirectories)) {
+        allowedDirectories = config.allowedDirectories;
+    } else {
+        // Fall back to default directories if not configured
+        allowedDirectories = [
+            os.homedir()   // User's home directory
+        ];
+        // Update config with default
+        await configManager.setValue('allowedDirectories', allowedDirectories);
     }
-    return [];
+    return allowedDirectories;
 }
 
 // Normalize all paths consistently

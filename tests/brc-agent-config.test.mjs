@@ -33,6 +33,10 @@ test('editable array settings preserve individual strings and parse JSON arrays'
   assert.deepEqual(await configManager.getValue('allowedDirectories'), ['folder[1]']);
   await configManager.setUserSetting('blockedCommands', '"shutdown"');
   assert.deepEqual(await configManager.getValue('blockedCommands'), ['shutdown']);
+  for (const command of ['true', 'false', '123']) {
+    await configManager.setUserSetting('blockedCommands', command);
+    assert.deepEqual(await configManager.getValue('blockedCommands'), [command]);
+  }
   await configManager.setUserSetting('blockedCommands', '["shutdown","reboot"]');
   assert.deepEqual(await configManager.getValue('blockedCommands'), ['shutdown', 'reboot']);
 });
@@ -143,6 +147,50 @@ test('dispatcher handles background usage tracking failures on damaged configura
     const result = await callTool('get_config', {});
     assert.equal(result.isError, true);
     await new Promise(resolve => setTimeout(resolve, 100));
+  `;
+  const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', script], {
+    cwd: process.cwd(), env: { ...process.env, BRC_HOME: dir }, encoding: 'utf8',
+  });
+  assert.equal(child.status, 0, child.stderr);
+});
+
+test('filesystem tool denies access when config cannot be loaded', async (t) => {
+  const dispatcherUrl = pathToFileURL(path.resolve('packages/agent/dist/dispatcher.js')).href;
+  for (const original of ['{broken', '[]']) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'brc-agent-file-security-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    await writeFile(path.join(dir, 'config.json'), original);
+    await writeFile(path.join(dir, 'private.txt'), 'secret');
+    const script = `
+      import assert from 'node:assert/strict';
+      const { callTool } = await import(${JSON.stringify(dispatcherUrl)});
+      const result = await callTool('list_directory', { path: process.env.BRC_HOME });
+      assert.equal(result.isError, true);
+      assert.doesNotMatch(JSON.stringify(result), /private\\.txt/);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    `;
+    const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', script], {
+      cwd: process.cwd(), env: { ...process.env, BRC_HOME: dir }, encoding: 'utf8',
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(await readFile(path.join(dir, 'config.json'), 'utf8'), original);
+  }
+});
+
+test('filesystem tool preserves unrestricted empty directory list', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'brc-agent-file-open-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'config.json'), JSON.stringify({
+    allowedDirectories: [], welcomeOnboardingEligible: false,
+  }));
+  await writeFile(path.join(dir, 'visible.txt'), 'contents');
+  const dispatcherUrl = pathToFileURL(path.resolve('packages/agent/dist/dispatcher.js')).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    const { callTool } = await import(${JSON.stringify(dispatcherUrl)});
+    const result = await callTool('list_directory', { path: process.env.BRC_HOME });
+    assert.notEqual(result.isError, true);
+    assert.match(JSON.stringify(result), /visible\\.txt/);
   `;
   const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', script], {
     cwd: process.cwd(), env: { ...process.env, BRC_HOME: dir }, encoding: 'utf8',

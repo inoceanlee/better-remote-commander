@@ -65,7 +65,7 @@ export function parseEditableValue(key: ConfigFieldKey, raw: unknown): string | 
       const input = value;
       try {
         const parsed: unknown = JSON.parse(input);
-        value = Array.isArray(parsed) ? parsed : typeof parsed === 'string' ? [parsed] : parsed;
+        value = Array.isArray(parsed) ? parsed : [typeof parsed === 'string' ? parsed : input];
       } catch {
         value = [input];
       }
