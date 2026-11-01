@@ -4,6 +4,7 @@ import type { BrcPaths } from '../config/paths.js';
 import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
 import { inspectProcess, ProcessManager, type ManagedServiceName, type ProcessIdentity } from '../lifecycle/processes.js';
 import { inspectProcesses } from '../lifecycle/identity.js';
+import { LifecycleLock } from '../lifecycle/lock.js';
 
 const SERVICE_NAMES: ManagedServiceName[] = ['relay', 'traefik', 'agent'];
 
@@ -170,7 +171,7 @@ async function runtimeSnapshot(paths: BrcPaths, report: CleanupReport): Promise<
   const names = new Set(SERVICE_NAMES.map((name) => `${name}.json`));
   const pids = new Set<number>();
   await Promise.all(entries.map(async (entry) => {
-    if (!names.has(entry.name) && entry.name !== 'lifecycle.lock'
+    if (!names.has(entry.name)
         && !entry.name.endsWith('.ready.json') && !entry.name.endsWith('.ready.json.tmp')) return;
     if (!entry.isFile() || entry.isSymbolicLink()) return;
     try {
@@ -513,6 +514,28 @@ async function cleanTraefikVersions(paths: BrcPaths, runtimes: Map<ManagedServic
   }
 }
 
+async function hasProtectedCleanupCandidates(paths: BrcPaths, report: CleanupReport): Promise<boolean> {
+  if (await safeDirectory(paths.root, paths.runtime, report)) {
+    try {
+      const entries = await readdir(paths.runtime);
+      if (entries.some((name) => SERVICE_NAMES.some((service) => name === `${service}.json`)
+          || name.endsWith('.ready.json') || name.endsWith('.ready.json.tmp'))) return true;
+    } catch (error) {
+      issue(report.failures, paths.runtime, error instanceof Error ? error.message : String(error));
+      return true;
+    }
+  }
+  if ((await collectLogs(paths, report)).length > 0) return true;
+  const versionsPath = path.join(paths.traefik, 'versions');
+  if (!await safeDirectory(paths.root, versionsPath, report)) return false;
+  try {
+    return (await readdir(versionsPath)).length > 0;
+  } catch (error) {
+    issue(report.failures, versionsPath, error instanceof Error ? error.message : String(error));
+    return true;
+  }
+}
+
 export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}): Promise<CleanupReport> {
   const report: CleanupReport = { removed: 0, bytesRemoved: 0, wouldRemove: 0, failures: [], preserved: [] };
   const dryRun = options.dryRun === true;
@@ -528,16 +551,43 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
     return report;
   }
 
-  const snapshot = await runtimeSnapshot(paths, report);
-  const runtimes = await inspectServiceRecords(paths, report, dryRun, snapshot);
-  if (await safeDirectory(paths.root, paths.runtime, report)) {
-    await cleanLifecycleLock(paths, report, dryRun, snapshot);
-    await cleanReadyFiles(paths, report, dryRun, snapshot);
-  }
   const cutoff = Date.now() - settings.logs.retentionDays * 24 * 60 * 60 * 1000;
   await cleanTemporaryFiles(paths, report, dryRun, cutoff);
-  await cleanLogs(paths, runtimes, report, dryRun, cutoff, settings.logs.maxTotalMiB * 1024 * 1024);
-  await cleanTraefikVersions(paths, runtimes, report, dryRun, cutoff);
+  if (!await safeDirectory(paths.root, paths.runtime, report)) return report;
+
+  const lockPath = path.join(paths.runtime, 'lifecycle.lock');
+  try {
+    const lockFile = await readRegularFile(lockPath);
+    const value = JSON.parse(lockFile.contents) as unknown;
+    if (!value || typeof value !== 'object' || !('pid' in value)
+        || typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0) {
+      throw new Error('Lock record has no valid PID.');
+    }
+    let snapshot: IdentitySnapshot;
+    try {
+      snapshot = await inspectProcesses([value.pid]);
+    } catch (error) {
+      snapshot = error instanceof Error ? error : new Error(String(error));
+    }
+    await cleanLifecycleLock(paths, report, dryRun, snapshot);
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') {
+      issue(report.preserved, lockPath, `Lock record is damaged or unverified: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (!await hasProtectedCleanupCandidates(paths, report)) return report;
+
+  try {
+    await new LifecycleLock(paths).runExclusive(async () => {
+      const snapshot = await runtimeSnapshot(paths, report);
+      const runtimes = await inspectServiceRecords(paths, report, dryRun, snapshot);
+      await cleanReadyFiles(paths, report, dryRun, snapshot);
+      await cleanLogs(paths, runtimes, report, dryRun, cutoff, settings.logs.maxTotalMiB * 1024 * 1024);
+      await cleanTraefikVersions(paths, runtimes, report, dryRun, cutoff);
+    });
+  } catch (error) {
+    issue(report.preserved, paths.runtime, `Cleanup could not acquire the lifecycle lock: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return report;
 }
 export async function removeBrcData(paths: BrcPaths): Promise<CleanupReport> {

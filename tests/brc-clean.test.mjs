@@ -8,6 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { cleanRuntime } from '../packages/cli/dist/maintenance/cleanup.js';
 import { ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
+import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { appendRotatingLog } from '../packages/shared/dist/managed-log.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -217,10 +218,45 @@ test('preserves live and malformed ready and lock records', async (t) => {
 
   const report = await cleanRuntime(brcPaths);
 
-  for (const filename of [ready, malformed, lock]) {
-    assert.equal(await exists(filename), true);
-    assert.ok(report.preserved.some((item) => item.path === filename));
+  for (const filename of [ready, malformed, lock]) assert.equal(await exists(filename), true);
+  assert.ok(report.preserved.some((item) => item.path === lock));
+  assert.ok(report.preserved.some((item) => item.path === brcPaths.runtime));
+});
+
+test('cleanup skips service logs and versions while lifecycle changes hold the lock', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const log = path.join(brcPaths.logs, 'relay.log');
+  const versions = path.join(brcPaths.traefik, 'versions');
+  const version = path.join(versions, 'next');
+  const manifest = path.join(brcPaths.traefik, 'versions.json');
+  await mkdir(version, { recursive: true });
+  await writeFile(path.join(version, 'traefik.exe'), 'version');
+  await writeFile(log, 'startup output');
+  await setAge(log, 8 * DAY);
+  await setAge(version, 8 * DAY);
+  await writeFile(manifest, JSON.stringify({ version: 1, current: 'old', previous: null }));
+
+  let entered;
+  let release;
+  const inside = new Promise((resolve) => { entered = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  const operation = new LifecycleLock(brcPaths).runExclusive(async () => {
+    entered();
+    await hold;
+    await writeFile(manifest, JSON.stringify({ version: 1, current: 'next', previous: 'old' }));
+  });
+  await inside;
+  try {
+    const report = await cleanRuntime(brcPaths);
+    assert.equal(await exists(log), true);
+    assert.equal(await exists(version), true);
+    assert.ok(report.preserved.some((item) => item.path === brcPaths.runtime && /lock/i.test(item.reason)));
+  } finally {
+    release();
+    await operation;
   }
+  await cleanRuntime(brcPaths);
+  assert.equal(await exists(version), true);
 });
 
 test('removes ready and lock records for an exited process', async (t) => {
@@ -251,9 +287,7 @@ const root = ${JSON.stringify(root)};
 const scenario = ${JSON.stringify(scenario)};
 const paths = Object.fromEntries(['traefik', 'config', 'data', 'runtime', 'logs', 'tmp'].map((name) => [name, path.join(root, name)]));
 paths.root = root;
-const lock = path.join(paths.runtime, 'lifecycle.lock');
 const ready = path.join(paths.runtime, 'relay.sample.ready.json');
-const lockContents = JSON.stringify({ pid: 12, createdAt: 'old', executablePath: process.execPath, commandLine: 'old' });
 const readyContents = JSON.stringify({ pid: 12 });
 const files = [];
 if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
@@ -267,9 +301,8 @@ if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
     }));
     files.push(filename);
   }
-  writeFileSync(lock, lockContents);
   writeFileSync(ready, readyContents);
-  files.push(lock, ready);
+  files.push(ready);
 } else {
   writeFileSync(ready, readyContents);
 }
@@ -279,9 +312,12 @@ const queries = [];
 childProcess.execFileSync = (_file, args) => {
   const query = args.at(-1);
   queries.push(query);
+  if (queries.length === 1) {
+    return JSON.stringify({ pid: process.pid, createdAt: 'owner', executablePath: process.execPath, commandLine: 'owner' });
+  }
   if (scenario === 'failure') throw new Error('CIM access denied');
   if (scenario === 'partial') {
-    if (queries.length === 1 || query.includes('ProcessId = 11')) throw new Error('CIM incomplete identity');
+    if (queries.length === 2 || query.includes('ProcessId = 11')) throw new Error('CIM incomplete identity');
     return '';
   }
   if (scenario === 'batch') {
@@ -289,7 +325,7 @@ childProcess.execFileSync = (_file, args) => {
       pid, createdAt: 'different', executablePath: process.execPath, commandLine: 'different',
     })));
   }
-  if (queries.length === 1) return '';
+  if (queries.length === 2) return '';
   if (scenario === 'replacement') {
     writeFileSync(ready, JSON.stringify({ pid: 13 }));
     return '';
@@ -300,15 +336,14 @@ syncBuiltinESMExports();
 const { cleanRuntime } = await import(${JSON.stringify(cleanupUrl)});
 const report = await cleanRuntime(paths);
 if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
-  assert.equal(queries.length, scenario === 'batch' ? 1 : scenario === 'failure' ? 3 : 5);
-  const pids = [...queries[0].matchAll(/ProcessId = (\\d+)/g)].map((match) => Number(match[1])).sort();
+  assert.equal(queries.length, scenario === 'batch' ? 2 : scenario === 'failure' ? 4 : 5);
+  const pids = [...queries[1].matchAll(/ProcessId = (\\d+)/g)].map((match) => Number(match[1])).sort();
   assert.deepEqual(pids, [11, 12]);
   if (scenario === 'partial') {
     for (const filename of files.slice(0, 3)) {
       assert.ok(readFileSync(filename, 'utf8'));
       assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM incomplete identity')));
     }
-    assert.equal(existsSync(lock), false);
     assert.equal(existsSync(ready), false);
   } else {
     for (const filename of files) {
@@ -320,7 +355,7 @@ if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
     }
   }
 } else {
-  assert.equal(queries.length, 2);
+  assert.equal(queries.length, 3);
   assert.equal(readFileSync(ready, 'utf8'), scenario === 'replacement' ? JSON.stringify({ pid: 13 }) : readyContents);
   assert.ok(report.preserved.some((item) => item.path === ready && /changed|reused/i.test(item.reason)));
 }
@@ -329,7 +364,7 @@ if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
   assert.equal(child.status, 0, child.stderr);
 }
 
-test('cleanup deduplicates service, lock and ready PIDs in one CIM query', async (t) => {
+test('cleanup deduplicates service and ready PIDs in one CIM query', async (t) => {
   const { root } = await makeRoot(t);
   runSimulatedCimCleanup(root, 'batch');
 });
