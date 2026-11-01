@@ -134,11 +134,8 @@ const start = (c: DeviceCredentials) => {
     agentVersion: VERSION, coreVersion: VERSION, tools, callTool, log,
     onUnauthorized: async () => {
       if (c.pairedAt === 'manual') return false;
-      log('warn', 'Relay rejected our device token; re-pairing');
-      clearCredentials();
-      const fresh = await pairDevice({ relayUrl: c.relayUrl, name: c.name, deviceId: c.deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
-      start(fresh);
-      return true;
+   log('error', 'Relay rejected the saved device token; credentials remain unchanged. Pair explicitly after checking device ownership.');
+   return false;
     },
   });
   client.start();

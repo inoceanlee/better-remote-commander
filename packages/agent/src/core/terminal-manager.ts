@@ -5,6 +5,9 @@ import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
 import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
+import { randomBytes } from 'node:crypto';
+import { createShellEncodingDecoder, encodeShellInput, SHELL_PROBE_OUTPUT_LIMIT_BYTES, SHELL_PROBE_TIMEOUT_MS, ShellEncodingProbe, type ShellEncodingInfo } from './terminal-encoding.js';
+
 
 /**
  * Standard Windows PATHEXT value, used to repair a corrupted PATHEXT before
@@ -144,6 +147,21 @@ function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig
   };
 }
 
+function getWindowsProbeShell(shellPath: string): 'powershell' | 'cmd' | null {
+ if (process.platform !== 'win32') return null;
+ const shellName = path.basename(shellPath).toLowerCase();
+ if (shellName === 'pwsh' || shellName === 'pwsh.exe' || shellName === 'powershell' || shellName === 'powershell.exe') return 'powershell';
+ if (shellName === 'cmd' || shellName === 'cmd.exe') return 'cmd';
+ return null;
+}
+
+function getShellProbeCommand(shell: 'powershell' | 'cmd', marker: string, command: string): string {
+ if (shell === 'powershell') {
+  return `$in=[Console]::InputEncoding.WebName;$out=[Console]::OutputEncoding.WebName;$pipe=$OutputEncoding.WebName;$cp=[Console]::OutputEncoding.CodePage;$report='${marker}|in='+$in+';out='+$out+';pipe='+$pipe+';cp='+$cp+[char]10;$bytes=[Text.Encoding]::ASCII.GetBytes($report);$stream=[Console]::OpenStandardOutput();$stream.Write($bytes,0,$bytes.Length);$stream.Flush();if([Console]::In.ReadLine() -ne 'Y'){exit 125};${command}`;
+ }
+ return `for /f "tokens=2 delims=:" %A in ('chcp') do @echo ${marker}^|cp=%A & set /p "_BRC_READY=" && ${command}`;
+}
+
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
@@ -164,7 +182,7 @@ export class TerminalManager {
       if (session.process.stdin && !session.process.stdin.destroyed) {
         // Ensure input ends with a newline for most REPLs
         const inputWithNewline = input.endsWith('\n') ? input : input + '\n';
-        session.process.stdin.write(inputWithNewline);
+    session.process.stdin.write(session.inputEncoding ? encodeShellInput(inputWithNewline, session.inputEncoding) : inputWithNewline);
         return true;
       }
       return false;
@@ -197,13 +215,20 @@ export class TerminalManager {
       console.log(`Enhanced SSH command: ${enhancedCommand}`);
     }
 
+  const effectiveShellPath = typeof shellToUse === 'string'
+   ? shellToUse
+   : process.platform === 'win32' && shellToUse ? (process.env.ComSpec ?? 'cmd.exe') : undefined;
+  const probeShell = effectiveShellPath ? getWindowsProbeShell(effectiveShellPath) : null;
+  const probeMarker = probeShell ? `BRC_PROBE_${randomBytes(16).toString('hex')}` : '';
+  const shellProbe = probeShell ? new ShellEncodingProbe(probeMarker, SHELL_PROBE_OUTPUT_LIMIT_BYTES, probeShell) : null;
+  const shellCommand = probeShell ? getShellProbeCommand(probeShell, probeMarker, enhancedCommand) : enhancedCommand;
     // Get the appropriate spawn configuration for the shell
     let spawnConfig: ShellSpawnConfig;
     let spawnOptions: any;
     
-    if (typeof shellToUse === 'string') {
+  if (effectiveShellPath) {
       // Use shell-specific configuration with login flags where appropriate
-      spawnConfig = getShellSpawnArgs(shellToUse, enhancedCommand);
+   spawnConfig = getShellSpawnArgs(effectiveShellPath, shellCommand);
       spawnOptions = {
         env: {
           ...process.env,
@@ -312,6 +337,12 @@ export class TerminalManager {
     return new Promise((resolve) => {
       let resolved = false;
       let periodicCheck: NodeJS.Timeout | null = null;
+   let commandTimeout: NodeJS.Timeout | null = null;
+   let probeTimeout: NodeJS.Timeout | null = null;
+   let probeReady = !shellProbe;
+   let stderrPending = Buffer.alloc(0);
+   let stdoutDecoder = createShellEncodingDecoder('utf-8');
+   let stderrDecoder = createShellEncodingDecoder('utf-8');
 
       // Quick prompt patterns for immediate detection
       const quickPromptPatterns = />>>\s*$|>\s*$|\$\s*$|#\s*$/;
@@ -320,6 +351,8 @@ export class TerminalManager {
         if (resolved) return;
         resolved = true;
         if (periodicCheck) clearInterval(periodicCheck);
+    if (commandTimeout) clearTimeout(commandTimeout);
+    if (probeTimeout) clearTimeout(probeTimeout);
 
         // Add timing info if requested
         if (collectTiming) {
@@ -339,6 +372,26 @@ export class TerminalManager {
         resolve(result);
       };
 
+   const startCommandTimeout = () => {
+    commandTimeout = setTimeout(() => {
+     session.isBlocked = true;
+     exitReason = 'timeout';
+     resolveOnce({ pid: childProcess.pid!, output, isBlocked: true });
+    }, timeoutMs);
+   };
+   const failProbe = (reason: string) => {
+    if (probeReady || resolved) return;
+    probeReady = true;
+    childProcess.kill();
+    exitReason = 'process_exit';
+    resolveOnce({ pid: childProcess.pid!, output: 'Shell encoding probe failed: ' + reason, isBlocked: false });
+   };
+   if (shellProbe) {
+    probeTimeout = setTimeout(() => failProbe('timed out'), SHELL_PROBE_TIMEOUT_MS);
+   } else {
+    startCommandTimeout();
+   }
+
       // Now that resolveOnce exists, route process errors into it: an error after
       // a successful spawn means the process is gone, so the caller must not sit
       // waiting for output that will never arrive.
@@ -357,8 +410,35 @@ export class TerminalManager {
         forwardProcessError(pendingProcessError);
       }
 
-      childProcess.stdout.on('data', (data: any) => {
-        const text = data.toString();
+   childProcess.stdout.on('data', (data: Buffer) => {
+    let text: string;
+    if (shellProbe && !probeReady) {
+     try {
+      const detected = shellProbe.push(Buffer.from(data));
+      if (detected.state === 'pending') return;
+      const info = detected.info!;
+      stdoutDecoder = createShellEncodingDecoder(info.consoleOutput);
+      stderrDecoder = createShellEncodingDecoder(info.consoleOutput);
+      const prefix = Buffer.concat([detected.stdout ?? Buffer.alloc(0), detected.trailing ?? Buffer.alloc(0)]);
+      text = stdoutDecoder.write(prefix);
+      if (stderrPending.length) {
+       const earlyStderr = stderrDecoder.write(stderrPending);
+       if (!resolved) output += earlyStderr;
+       this.appendToLineBuffer(session, earlyStderr);
+       stderrPending = Buffer.alloc(0);
+      }
+      childProcess.stdin?.write(encodeShellInput('Y\n', info.consoleInput));
+      session.inputEncoding = info.consoleInput;
+      probeReady = true;
+      if (probeTimeout) clearTimeout(probeTimeout);
+      startCommandTimeout();
+     } catch (error) {
+      failProbe(error instanceof Error ? error.message : String(error));
+      return;
+     }
+    } else {
+     text = stdoutDecoder.write(Buffer.from(data));
+    }
         const now = Date.now();
 
         if (!firstOutputTime) firstOutputTime = now;
@@ -403,8 +483,13 @@ export class TerminalManager {
         }
       });
 
-      childProcess.stderr.on('data', (data: any) => {
-        const text = data.toString();
+   childProcess.stderr.on('data', (data: Buffer) => {
+    if (shellProbe && !probeReady) {
+     stderrPending = Buffer.concat([stderrPending, Buffer.from(data)]);
+     if (stderrPending.length > SHELL_PROBE_OUTPUT_LIMIT_BYTES) failProbe('stderr exceeded limit');
+     return;
+    }
+    const text = stderrDecoder.write(Buffer.from(data));
         const now = Date.now();
 
         if (!firstOutputTime) firstOutputTime = now;
@@ -446,17 +531,6 @@ export class TerminalManager {
           }
         }
       }, 100);
-
-      // Timeout fallback
-      setTimeout(() => {
-        session.isBlocked = true;
-        exitReason = 'timeout';
-        resolveOnce({
-          pid: childProcess.pid!,
-          output,
-          isBlocked: true
-        });
-      }, timeoutMs);
 
       childProcess.on('exit', (code: any) => {
         if (childProcess.pid) {

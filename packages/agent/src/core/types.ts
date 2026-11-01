@@ -24,6 +24,7 @@ export interface TerminalSession {
   bufferedChars: number;      // Joined length of outputLines (content + separators)
   evictedLines: number;       // Lines dropped from the front to enforce the buffer cap
   evictedChars: number;       // Joined length of evicted lines (keeps snapshot offsets absolute)
+  inputEncoding?: string;
 }
 
 export interface CommandExecutionResult {

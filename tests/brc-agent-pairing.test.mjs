@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pairDevice, loadCredentials } from '../packages/agent/dist/transport/pairing.js';
+import { CredentialStore } from '../packages/agent/dist/transport/credential-store.js';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -93,33 +94,51 @@ test('legacy credential files remain readable', async (t) => {
   writeFileSync(s.file, JSON.stringify(legacy));
   assert.deepEqual(loadCredentials(), legacy);
 });
+test('automatic pairing rejects an existing valid credential before contacting relay', async (t) => {
+  const s = await scenario(t, []);
+  const existing = { relayUrl: 'https://old.example', deviceId: 'old-id', deviceToken: 'old-secret', name: 'old', pairedAt: '2020-01-01T00:00:00.000Z' };
+  writeFileSync(s.file, JSON.stringify(existing));
 
-test('agent saves newly approved credentials once when a relay rejects its old token', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'brc-repair-'));
+  await assert.rejects(s.run(), /already paired/);
+
+  assert.deepEqual(s.requests, []);
+  assert.deepEqual(JSON.parse(readFileSync(s.file, 'utf8')), existing);
+  assert.equal(s.logs.some((line) => line.includes(existing.deviceToken)), false);
+});
+
+test('failed credential write leaves no partial device file', (t) => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'brc-credential-store-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const store = new CredentialStore(home, {
+    writeFileSync(file, data, options) {
+      writeFileSync(file, String(data).slice(0, 12), options);
+      throw new Error('simulated interrupted write');
+    },
+  });
+
+  assert.throws(() => store.save({ relayUrl: 'https://relay.example', deviceId: 'id', deviceToken: 'secret', name: 'agent', pairedAt: '2026-01-01T00:00:00.000Z' }), /simulated interrupted write/);
+
+  assert.equal(existsSync(path.join(home, 'device.json')), false);
+  assert.deepEqual(readdirSync(home), []);
+});
+
+test('agent preserves credentials when a relay rejects its token', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'brc-pairing-reject-'));
   const home = path.join(root, 'home');
-  const trace = path.join(root, 'writes.log');
-  const preload = path.join(root, 'trace.cjs');
   const { mkdirSync } = await import('node:fs');
   mkdirSync(home);
-  writeFileSync(preload, `
-    const fs = require('node:fs');
-    const original = fs.writeFileSync;
-    fs.writeFileSync = function(file, ...args) {
-      if (String(file) === process.env.PAIRING_CREDENTIAL_FILE) {
-        fs.appendFileSync(process.env.PAIRING_WRITE_TRACE, 'write\\n');
-      }
-      return original.call(this, file, ...args);
-    };
-    require('node:module').syncBuiltinESMExports();
-  `);
   let resolveReconnected;
   let heldSocket;
   const reconnected = new Promise((resolve) => { resolveReconnected = resolve; });
   let upgrades = 0;
+  let pairingStarts = 0;
   const socketErrors = [];
   const server = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
-    if (req.url === '/device/start') return res.end(JSON.stringify({ ...start, expires_in: 30 }));
+    if (req.url === '/device/start') {
+      pairingStarts++;
+      return res.end(JSON.stringify({ ...start, expires_in: 30 }));
+    }
     if (req.url === '/device/poll') return res.end(JSON.stringify({ device_token: 'new-token', device_id: 'old-id' }));
     res.writeHead(404).end('{}');
   });
@@ -141,9 +160,8 @@ test('agent saves newly approved credentials once when a relay rejects its old t
   const file = path.join(home, 'device.json');
   writeFileSync(file, JSON.stringify({ relayUrl, deviceId: 'old-id', deviceToken: 'old-token', name: 'old agent', pairedAt: '2020-01-01T00:00:00.000Z' }));
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('BRC_')));
-  const child = spawn(process.execPath, ['--require', preload, fileURLToPath(new URL('../packages/agent/dist/cli.js', import.meta.url)), '--no-browser'], {
-    env: { ...env, BRC_HOME: home, BRC_UPSTREAM_TELEMETRY: '0', PAIRING_CREDENTIAL_FILE: file, PAIRING_WRITE_TRACE: trace },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../packages/agent/dist/cli.js', import.meta.url)), '--no-browser'], {
+    env: { ...env, BRC_HOME: home, BRC_UPSTREAM_TELEMETRY: '0' },
     windowsHide: true,
   });
   let output = '';
@@ -167,13 +185,11 @@ test('agent saves newly approved credentials once when a relay rejects its old t
       new Promise((_, reject) => child.once('exit', (code) => reject(new Error(`agent exited (${code}):\n${output}`)))),
       new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`agent did not reconnect:\n${output}`)), 15000); }),
     ]);
-    assert.equal(authorization, 'Bearer new-token');
+    assert.equal(authorization, 'Bearer old-token');
   } finally {
     clearTimeout(timeout);
   }
-  assert.equal(readFileSync(trace, 'utf8'), 'write\n');
-  const saved = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(saved.deviceToken, 'new-token');
-  assert.equal(saved.deviceId, 'old-id');
-  assert.equal(saved.relayUrl, relayUrl);
+  assert.equal(pairingStarts, 0);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).deviceToken, 'old-token');
+  assert.match(output, /credentials remain unchanged/);
 });
