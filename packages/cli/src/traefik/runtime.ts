@@ -10,8 +10,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { appendRotatingLog, installManagedLog, startManagedControlServer, type ManagedControlServer } from 'brc-shared';
 import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
 import type { BrcPaths } from '../config/paths.js';
-import { renderConfig, type TraefikTemplates } from './output.js';
-import { ensureRegularFile, ensureSafeDirectory, errorMessage, readManifest } from './core.js';
+import { renderConfig, errorMessage, type TraefikTemplates } from './core.js';
+import { readManifest } from './input.js';
+import { ensureRegularFile, ensureSafeDirectory } from './output.js';
 const execFile = promisify(execFileCallback);
 
 type ChildProcess = ReturnType<typeof spawn>;
@@ -161,7 +162,7 @@ export async function runHealthProbe(
       ...settings,
       services: { ...settings.services, relayPort: backendPort, proxyPort, healthPort },
     };
-    const config = renderConfig(templates, probeSettings, dynamicPath, randomUUID());
+    const config = renderConfig({ templates, dynamicSettings: probeSettings, staticSettings: probeSettings, dynamicPath, generation: randomUUID() });
     await writeFile(dynamicPath, config.dynamicConfig, { flag: 'wx' });
     await writeFile(staticPath, config.staticConfig, { flag: 'wx' });
 

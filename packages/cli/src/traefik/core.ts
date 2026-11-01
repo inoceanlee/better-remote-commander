@@ -1,7 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import type { BrcSettings } from '../config/settings.js';
+import type { ZipEntry } from 'unzipper';
 
 export interface VersionManifest {
   version: 1;
@@ -43,48 +41,6 @@ export function parseManifest(value: unknown): VersionManifest {
   return { version: 1, current: manifest.current, previous: manifest.previous };
 }
 
-export async function ensureSafeDirectory(root: string, directory: string): Promise<void> {
-  const resolvedRoot = path.resolve(root);
-  const resolvedDirectory = path.resolve(directory);
-  const relative = path.relative(resolvedRoot, resolvedDirectory);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`Traefik path is outside its installation directory: ${directory}`);
-  }
-
-  await mkdir(resolvedRoot, { recursive: true });
-  let current = resolvedRoot;
-  const rootInfo = await lstat(current);
-  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error(`Traefik installation path is not a regular directory: ${current}`);
-  if (relative === '') return;
-
-  for (const segment of relative.split(path.sep)) {
-    current = path.join(current, segment);
-    try {
-      await lstat(current);
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error;
-      await mkdir(current);
-    }
-    const info = await lstat(current);
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Traefik path is not a regular directory: ${current}`);
-  }
-}
-
-export async function ensureRegularFile(filename: string): Promise<void> {
-  const info = await lstat(filename);
-  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Traefik path is not a regular file: ${filename}`);
-}
-
-export async function readManifest(root: string): Promise<VersionManifest | null> {
-  const filename = path.join(root, 'versions.json');
-  try {
-    await ensureRegularFile(filename);
-    return parseManifest(JSON.parse(await readFile(filename, 'utf8')) as unknown);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return null;
-    throw error;
-  }
-}
 
 export function safeArchivePath(value: string): boolean {
   if (!value || value.includes('\\') || value.includes('\0') || value.startsWith('/') || /^[a-z]:/i.test(value)) return false;
@@ -92,11 +48,6 @@ export function safeArchivePath(value: string): boolean {
   return segments.length > 0 && segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-export async function sha256File(filename: string): Promise<string> {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filename)) hash.update(chunk);
-  return hash.digest('hex');
-}
 
 export function quoteYaml(value: string): string {
   return JSON.stringify(value.replaceAll('\\', '/'));
@@ -109,13 +60,77 @@ export function renderTemplate(template: string, replacements: Record<string, st
   return result;
 }
 
-export async function writeAtomic(filename: string, contents: string): Promise<void> {
-  await mkdir(path.dirname(filename), { recursive: true });
-  const temporary = `${filename}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await rename(temporary, filename);
-  } finally {
-    await rm(temporary, { force: true });
+export interface TraefikTemplates {
+  staticConfig: string;
+  dynamicConfig: string;
+}
+
+export function renderConfig({ templates, dynamicSettings, staticSettings, dynamicPath, generation }: {
+  templates: TraefikTemplates;
+  dynamicSettings: Readonly<BrcSettings>;
+  staticSettings: Readonly<BrcSettings>;
+  dynamicPath: string;
+  generation: string;
+}): TraefikTemplates {
+  return {
+    dynamicConfig: renderTemplate(templates.dynamicConfig, {
+      '@@BRC_RELAY_URL@@': quoteYaml(`http://127.0.0.1:${dynamicSettings.services.relayPort}`),
+      '@@BRC_RATE_AVERAGE@@': String(dynamicSettings.proxy.rate.average),
+      '@@BRC_RATE_PERIOD@@': quoteYaml(dynamicSettings.proxy.rate.period),
+      '@@BRC_RATE_BURST@@': String(dynamicSettings.proxy.rate.burst),
+      '@@BRC_CONCURRENT@@': String(dynamicSettings.proxy.concurrent),
+      '@@BRC_CONFIG_GENERATION@@': quoteYaml(generation),
+    }),
+    staticConfig: renderTemplate(templates.staticConfig, {
+      '@@BRC_WEB_ADDRESS@@': quoteYaml(`127.0.0.1:${staticSettings.services.proxyPort}`),
+      '@@BRC_HEALTH_ADDRESS@@': quoteYaml(`127.0.0.1:${staticSettings.services.healthPort}`),
+      '@@BRC_DYNAMIC_FILE@@': quoteYaml(dynamicPath),
+    }),
+  };
+}
+export function readChecksum(contents: string, filename: string): string {
+    for (const line of contents.split(/\r?\n/)) {
+      const match = line.trim().match(/^([a-f\d]{64})\s+\*?(.+)$/i);
+      if (match?.[2] === filename) return match[1].toLowerCase();
+    }
+    throw new Error(`Official Traefik checksum file does not contain ${filename}.`);
   }
+
+export function parseRelease(value: unknown): TraefikRelease {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Official Traefik release metadata is malformed.');
+    const release = value as Record<string, unknown>;
+    if (release.draft !== false || release.prerelease !== false || typeof release.tag_name !== 'string') {
+      throw new Error('The latest Traefik release is not a stable release.');
+    }
+    const match = release.tag_name.match(/^v(\d+\.\d+\.\d+)$/);
+    if (!match) throw new Error(`Official Traefik release tag is invalid: ${release.tag_name}`);
+    const version = match[1];
+    const archiveName = `traefik_v${version}_windows_amd64.zip`;
+    const checksumName = `traefik_v${version}_checksums.txt`;
+    if (!Array.isArray(release.assets)) throw new Error('Official Traefik release has no asset list.');
+    const assets = release.assets as unknown[];
+    const findAsset = (name: string): string => {
+      const asset = assets.find((item) => item && typeof item === 'object' && (item as Record<string, unknown>).name === name) as Record<string, unknown> | undefined;
+      const url = asset?.browser_download_url;
+      const expected = `https://github.com/traefik/traefik/releases/download/v${version}/${name}`;
+      if (url !== expected) throw new Error(`Official Traefik asset is missing or has an unexpected URL: ${name}`);
+      return expected;
+    };
+    return { version, archiveName, archiveUrl: findAsset(archiveName), checksumUrl: findAsset(checksumName) };
+}
+
+export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
+  const names = new Set<string>();
+  let executable: ZipEntry | undefined;
+  for (const entry of entries) {
+    if (!safeArchivePath(entry.path)) throw new Error(`Traefik ZIP contains an unsafe path: ${entry.path}`);
+    if (names.has(entry.path)) throw new Error(`Traefik ZIP contains a duplicate path: ${entry.path}`);
+    names.add(entry.path);
+    if (entry.path === 'traefik.exe' && entry.type === 'File') executable = entry;
+  }
+  const size = executable?.uncompressedSize;
+  if (!executable || typeof size !== 'number' || size < 1 || size > MAX_EXECUTABLE_BYTES) {
+    throw new Error('Traefik ZIP does not contain a valid root-level traefik.exe.');
+  }
+  return executable;
 }

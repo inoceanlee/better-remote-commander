@@ -16,6 +16,7 @@ import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { SettingsManager } from '../packages/cli/dist/config/manager.js';
 import { TraefikManager } from '../packages/cli/dist/traefik/manager.js';
 import { waitForConfigGeneration } from '../packages/cli/dist/traefik/runtime.js';
+import { renderConfig } from '../packages/cli/dist/traefik/core.js';
 
 const API_URL = 'https://api.github.com/repos/traefik/traefik/releases/latest';
 const TEST_BINARY = process.env.BRC_TRAEFIK_TEST_BINARY;
@@ -302,6 +303,78 @@ async function manifest(paths) {
 async function installedExecutable(paths, version) {
   return readFile(path.join(paths.traefik, 'versions', version, 'traefik.exe'), 'utf8');
 }
+
+test('setup reports operation stages and download failures without changing the error', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const events = [];
+  const manager = makeManager(brcPaths, release, { reporter: (event) => events.push(event) });
+  await manager.setup();
+  assert.ok(events.some((event) => event.operation === 'setup' && event.stage === 'release' && event.status === 'completed'));
+  assert.ok(events.some((event) => event.operation === 'setup' && event.stage === 'stage' && event.status === 'completed'));
+  release.setVersion('3.7.17', { checksum: '0'.repeat(64) });
+  await assert.rejects(manager.update(), /checksum/i);
+  assert.ok(events.some((event) => event.operation === 'update' && event.stage === 'stage' && event.status === 'failed'));
+});
+
+test('unsafe archives and checksum failures preserve installed files and both configurations', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const manager = makeManager(brcPaths, release);
+  await manager.setup();
+  const files = [
+    path.join(brcPaths.traefik, 'versions', '3.7.16', 'traefik.exe'),
+    path.join(brcPaths.traefik, 'versions.json'),
+    path.join(brcPaths.traefik, 'config', 'dynamic.yml'),
+    path.join(brcPaths.traefik, 'config', 'traefik.yml'),
+  ];
+  const before = await Promise.all(files.map((file) => readFile(file)));
+  for (const options of [
+    { checksum: '0'.repeat(64) },
+    { archive: makeZip([{ name: 'traefik.exe', contents: Buffer.from('binary') }, { name: '../escape', contents: Buffer.from('bad') }]) },
+    { archive: makeZip([{ name: 'traefik.exe', contents: Buffer.from('binary') }, { name: 'traefik.exe', contents: Buffer.from('other') }]) },
+  ]) {
+    release.setVersion('3.7.17', options);
+    await assert.rejects(manager.update());
+    assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
+  }
+});
+
+test('pure rendering uses independent static and dynamic settings', () => {
+  const dynamicSettings = settingsFor({ BRC_RELAY_PORT: '14000' });
+  const staticSettings = settingsFor({ BRC_TRAEFIK_PORT: '14001', BRC_TRAEFIK_HEALTH_PORT: '14002' });
+  const result = renderConfig({
+    templates: { dynamicConfig: '@@BRC_RELAY_URL@@ @@BRC_RATE_AVERAGE@@', staticConfig: '@@BRC_WEB_ADDRESS@@ @@BRC_HEALTH_ADDRESS@@ @@BRC_DYNAMIC_FILE@@' },
+    dynamicSettings, staticSettings, dynamicPath: 'config/dynamic.yml', generation: 'generation',
+  });
+  assert.match(result.dynamicConfig, /127\.0\.0\.1:14000/);
+  assert.match(result.staticConfig, /127\.0\.0\.1:14001/);
+  assert.match(result.staticConfig, /127\.0\.0\.1:14002/);
+});
+
+test('failed release acquisition leaves installed executable and configuration unchanged', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  const manager = makeManager(brcPaths, release);
+  await manager.setup();
+  const files = [
+    path.join(brcPaths.traefik, 'versions', '3.7.16', 'traefik.exe'),
+    path.join(brcPaths.traefik, 'versions.json'),
+    path.join(brcPaths.traefik, 'config', 'dynamic.yml'),
+    path.join(brcPaths.traefik, 'config', 'traefik.yml'),
+  ];
+  const before = await Promise.all(files.map((file) => readFile(file)));
+  for (const status of [403, 429]) {
+    const blocked = makeManager(brcPaths, release, {
+      fetch: async () => new Response('', { status, headers: { 'x-ratelimit-remaining': '0' } }),
+    });
+    await assert.rejects(blocked.update());
+    assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
+  }
+  release.setVersion('3.7.17', { archive: Buffer.from('not a zip') });
+  await assert.rejects(manager.update());
+  assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
+});
 
 test('configuration uses BrcSettings and keeps a single public proxy router', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);

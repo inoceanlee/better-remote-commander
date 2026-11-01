@@ -4,15 +4,25 @@ import path from 'node:path';
 import type { BrcPaths } from '../config/paths.js';
 import type { BrcSettings } from '../config/settings.js';
 import type { LockedServiceOperations, ServiceManager } from '../lifecycle/services.js';
-import { ensureSafeDirectory, readManifest, type TraefikRelease, type VersionManifest } from './core.js';
-import { TraefikInput, type TraefikInputOptions } from './input.js';
-import { TraefikOutput } from './output.js';
+import { readChecksum, renderConfig, type TraefikRelease, type VersionManifest } from './core.js';
+import { readManifest, TraefikInput, type TraefikInputOptions } from './input.js';
+import { ensureSafeDirectory, TraefikOutput } from './output.js';
 import { runHealthProbe, verifyExecutable, waitForConfigGeneration } from './runtime.js';
+
+export interface TraefikProgressEvent {
+  operation: 'setup' | 'update' | 'rollback' | 'config';
+  stage: 'release' | 'download' | 'verify' | 'stage' | 'health' | 'activate' | 'config';
+  status: 'started' | 'completed' | 'failed';
+  completedBytes?: number;
+  totalBytes?: number;
+}
+export type TraefikProgressReporter = (event: TraefikProgressEvent) => void;
 
 export interface TraefikManagerOptions extends TraefikInputOptions {
   verifyExecutable?: (filename: string, version: string) => Promise<void>;
   healthCheck?: (filename: string, version: string) => Promise<void>;
   loadSettings?: () => Promise<Readonly<BrcSettings>>;
+  reporter?: TraefikProgressReporter;
 }
 
 export type TraefikLifecycle = Pick<ServiceManager, 'status' | 'withLock'>;
@@ -24,6 +34,7 @@ export class TraefikManager {
   private readonly verify: (filename: string, version: string) => Promise<void>;
   private readonly healthCheck: (filename: string, version: string) => Promise<void>;
   private readonly loadSettings: () => Promise<Readonly<BrcSettings>>;
+  private readonly reporter?: TraefikProgressReporter;
 
   constructor(
     private readonly paths: BrcPaths,
@@ -31,11 +42,12 @@ export class TraefikManager {
     private readonly lifecycle: TraefikLifecycle,
     options: TraefikManagerOptions = {},
   ) {
-    this.input = new TraefikInput(paths, options);
-    this.output = new TraefikOutput(paths, settings);
+    this.input = new TraefikInput(options);
+    this.output = new TraefikOutput(paths);
+    this.reporter = options.reporter;
     this.loadSettings = options.loadSettings ?? (async () => settings);
     this.verify = options.verifyExecutable ?? ((filename, version) => verifyExecutable(filename, version, settings));
-    this.healthCheck = options.healthCheck ?? (async (filename) => runHealthProbe(filename, paths, settings, await this.output.readTemplates()));
+    this.healthCheck = options.healthCheck ?? (async (filename) => runHealthProbe(filename, paths, settings, await this.input.readTemplates()));
   }
 
   setup(): Promise<void> {
@@ -60,10 +72,10 @@ export class TraefikManager {
         return;
       }
 
-      const release = await this.input.latestRelease();
-      const stage = await this.input.downloadAndStage(release);
+      const release = await this.progress('setup', 'release', () => this.input.latestRelease());
+      const stage = await this.stageRelease(release, 'setup');
       try {
-        await this.validateCandidate(stage, release);
+        await this.progress('setup', 'health', () => this.validateCandidate(stage, release));
         await this.lifecycle.withLock(async () => {
           if (await readManifest(this.paths.traefik)) return;
           await this.writeCurrentConfig();
@@ -80,7 +92,7 @@ export class TraefikManager {
       await this.prepareDirectories();
       const initiallyInstalled = await readManifest(this.paths.traefik);
       if (!initiallyInstalled) throw new Error('Traefik is not installed. Run brc setup first.');
-      const release = await this.input.latestRelease();
+      const release = await this.progress('update', 'release', () => this.input.latestRelease());
       if (release.version === initiallyInstalled.current) {
         await this.lifecycle.withLock(async () => {
           const current = await readManifest(this.paths.traefik);
@@ -92,9 +104,9 @@ export class TraefikManager {
         return;
       }
 
-      const stage = await this.input.downloadAndStage(release);
+      const stage = await this.stageRelease(release, 'update');
       try {
-        await this.validateCandidate(stage, release);
+        await this.progress('update', 'health', () => this.validateCandidate(stage, release));
         await this.lifecycle.withLock(async (operations) => {
           const installed = await readManifest(this.paths.traefik);
           if (!installed) throw new Error('Traefik is not installed. Run brc setup first.');
@@ -181,7 +193,9 @@ export class TraefikManager {
       : settings;
     const staticSettings = status?.state === 'running' && previous ? previous : settings;
     const generation = randomUUID();
-    await this.output.writeConfig(settings, generation, dynamicSettings, staticSettings);
+    const templates = await this.input.readTemplates();
+    const config = renderConfig({ templates, dynamicSettings, staticSettings, dynamicPath: path.join(this.paths.traefik, 'config', 'dynamic.yml'), generation });
+    await this.output.writeConfig(config);
     if (status?.state !== 'running') return;
     const ports = previous
       ? [settings.services.healthPort, previous.services.healthPort]
@@ -197,6 +211,25 @@ export class TraefikManager {
     const executable = path.join(stage, 'traefik.exe');
     await this.verify(executable, release.version);
     await this.healthCheck(executable, release.version);
+  }
+
+  private async stageRelease(release: TraefikRelease, operation: 'setup' | 'update'): Promise<string> {
+    const checksum = await this.progress(operation, 'verify', async () =>
+      readChecksum(await this.input.downloadChecksum(release), release.archiveName));
+    const response = await this.progress(operation, 'download', () => this.input.downloadArchive(release));
+    return this.progress(operation, 'stage', () => this.output.stageArchive(release, response, checksum));
+  }
+
+  private async progress<T>(operation: TraefikProgressEvent['operation'], stage: TraefikProgressEvent['stage'], action: () => Promise<T>): Promise<T> {
+    this.reporter?.({ operation, stage, status: 'started' });
+    try {
+      const result = await action();
+      this.reporter?.({ operation, stage, status: 'completed' });
+      return result;
+    } catch (error) {
+      this.reporter?.({ operation, stage, status: 'failed' });
+      throw error;
+    }
   }
 
   private async isRunning(): Promise<boolean> {
