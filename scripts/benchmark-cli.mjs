@@ -1,5 +1,6 @@
 // Windows: node scripts/benchmark-cli.mjs <absolute-official-traefik-executable>
 // Reuse the same isolated root and ports: node scripts/benchmark-cli.mjs --reuse <root>
+// Run only the diagnostic cycle: node scripts/benchmark-cli.mjs --diagnostics-only --reuse <root>
 // Install dependencies and build all workspace packages in this worktree first.
 // This uses the local CLI, not a global package. It never removes its temporary root.
 import { spawn } from 'node:child_process';
@@ -7,17 +8,19 @@ import { copyFile, mkdir, mkdtemp, realpath, readFile, writeFile } from 'node:fs
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { isolatedEnvironment, isAllowedPort, summarize } from './benchmark-cli-helpers.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(repo, 'packages', 'cli', 'dist', 'cli.js');
 const preload = path.join(repo, 'scripts', 'benchmark-cli-phases.mjs');
-const reuse = process.argv[2] === '--reuse';
-const argument = process.argv[reuse ? 3 : 2];
-if (process.platform !== 'win32' || !argument || !path.isAbsolute(argument) || process.argv.length !== (reuse ? 4 : 3)) {
-  throw new Error('Windows only. Supply an absolute official Traefik path, or --reuse followed by an existing benchmark root.');
+const diagnosticsOnly = process.argv[2] === '--diagnostics-only';
+const argOffset = diagnosticsOnly ? 3 : 2;
+const reuse = process.argv[argOffset] === '--reuse';
+const argument = process.argv[argOffset + (reuse ? 1 : 0)];
+if (process.platform !== 'win32' || (diagnosticsOnly && !reuse) || !argument || !path.isAbsolute(argument) || process.argv.length !== argOffset + (reuse ? 2 : 1)) {
+  throw new Error('Windows only. Supply an absolute official Traefik path, or [--diagnostics-only] --reuse followed by an existing benchmark root.');
 }
 
 async function reservePorts() {
@@ -88,7 +91,7 @@ const runId = `${Date.now()}-${randomBytes(4).toString('hex')}`;
 const reportFile = path.join(scratch, `benchmark-${runId}.json`);
 const phaseFile = path.join(scratch, `benchmark-${runId}-phases.jsonl`);
 const report = { root: scratch, ports, samples: {}, phases: { file: phaseFile, note: 'Separate instrumented cycle; nested phase times overlap. Cleanup and standalone identity query timings are not exposed by the CLI.' } };
-const cliRun = (command, diagnostic = false) => run(process.execPath, diagnostic ? ['--import', preload, cli, command] : [cli, command], diagnostic ? { ...env, BENCHMARK_PHASE_FILE: phaseFile } : env);
+const cliRun = (command, diagnostic = false) => run(process.execPath, diagnostic ? ['--import', pathToFileURL(preload).href, cli, command] : [cli, command], diagnostic ? { ...env, BENCHMARK_PHASE_FILE: phaseFile } : env);
 async function assertState(expected) {
   const result = await cliRun('status');
   for (const service of ['relay', 'traefik', 'agent']) {
@@ -148,19 +151,21 @@ try {
   }
   report.traefikVersion = metadata.traefikVersion;
   await assertState('stopped');
-  const samples = { coldStart: [], repeatedStart: [], status: [], help: [], stop: [] };
-  for (let i = 0; i < 5; i++) {
-    await assertState('stopped');
-    for (const [label, command] of [['coldStart', 'start'], ['repeatedStart', 'start'], ['status', 'status'], ['help', 'help'], ['stop', 'stop']]) {
-      const result = await cliRun(command);
-      samples[label].push(result.ms);
-      report.samples[label] = samples[label];
-      await writeFile(reportFile, JSON.stringify(report, null, 2));
-      if (label === 'coldStart' || label === 'repeatedStart') await assertState('running');
-      if (label === 'stop') await assertState('stopped');
+  if (!diagnosticsOnly) {
+    const samples = { coldStart: [], repeatedStart: [], status: [], help: [], stop: [] };
+    for (let i = 0; i < 5; i++) {
+      await assertState('stopped');
+      for (const [label, command] of [['coldStart', 'start'], ['repeatedStart', 'start'], ['status', 'status'], ['help', 'help'], ['stop', 'stop']]) {
+        const result = await cliRun(command);
+        samples[label].push(result.ms);
+        report.samples[label] = samples[label];
+        await writeFile(reportFile, JSON.stringify(report, null, 2));
+        if (label === 'coldStart' || label === 'repeatedStart') await assertState('running');
+        if (label === 'stop') await assertState('stopped');
+      }
     }
+    report.results = Object.fromEntries(Object.entries(samples).map(([label, values]) => [label, summarize(values)]));
   }
-  report.results = Object.fromEntries(Object.entries(samples).map(([label, values]) => [label, summarize(values)]));
   // Record nested method timings separately so instrumentation does not alter samples.
   await cliRun('start', true);
   await assertState('running');
@@ -170,7 +175,7 @@ try {
   await cliRun('stop', true);
   await assertState('stopped');
   await writeFile(reportFile, JSON.stringify(report, null, 2));
-  console.log(JSON.stringify(report.results, null, 2));
+  if (!diagnosticsOnly) console.log(JSON.stringify(report.results, null, 2));
   console.log(`Results: ${reportFile}`);
   console.log(`Phase timings: ${phaseFile}`);
 } catch (error) {
