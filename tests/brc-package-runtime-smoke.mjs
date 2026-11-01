@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+const root = path.resolve(process.argv[2]);
+const require = createRequire(pathToFileURL(path.join(root, 'package.json')).href);
+async function module(name) {
+  const resolved = require.resolve(name);
+  const result = await import(pathToFileURL(resolved).href);
+  console.log('IMPORT_OK', name);
+  return result;
+}
+const pdf = await module('pdf-lib');
+const doc = await pdf.PDFDocument.create();
+doc.addPage([100, 100]);
+assert.equal(Buffer.from(await doc.save()).subarray(0, 5).toString(), '%PDF-');
+const ex = await module('exceljs');
+const wb = new ex.default.Workbook();
+wb.addWorksheet('Test').getCell('A1').value = '中文';
+assert.ok((await wb.xlsx.writeBuffer()).byteLength > 100);
+const sharp = (await module('sharp')).default;
+assert.equal((await sharp({create:{width:2,height:2,channels:3,background:'#fff'}}).png().toBuffer())[0], 0x89);
+await module('md-to-pdf');
+await module('@opendocsg/pdf2md');
+const rg = await module('@vscode/ripgrep');
+assert.ok(existsSync(rg.rgPath));
+assert.equal(spawnSync(rg.rgPath, ['--version'], {windowsHide:true}).status, 0);
+const iconv=(await module('iconv-lite')).default;
+assert.equal(iconv.decode(iconv.encode('中文', 'gbk'), 'gbk'), '中文');
+console.log('RUNTIME_SMOKE_PASS');

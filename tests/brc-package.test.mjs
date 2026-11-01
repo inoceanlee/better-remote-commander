@@ -225,6 +225,8 @@ test('single package tarball is complete, self-contained, and globally installab
     assert.equal(response.processes[0].pid, process.pid);
   }
   await writeFile(path.join(extractedPackage, 'package.json'), `${JSON.stringify(manifest)}\n`);
+  run('tar', ['-xzf', tarball, '-C', inspectionDir, 'package/node_modules']);
+  assert.match(run(process.execPath, [path.join(repoRoot, 'tests', 'brc-package-runtime-smoke.mjs'), extractedPackage], { cwd: root }), /RUNTIME_SMOKE_PASS/);
   if (process.platform !== 'win32') {
     const cliMode = (await stat(path.join(extractedPackage, 'dist/cli.js'))).mode;
     assert.notEqual(cliMode & 0o111, 0, 'CLI bin must retain executable permissions');
