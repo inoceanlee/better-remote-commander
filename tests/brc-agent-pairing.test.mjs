@@ -6,7 +6,6 @@ import path from 'node:path';
 import { pairDevice, loadCredentials } from '../packages/agent/dist/transport/pairing.js';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const start = { device_code: 'code', user_code: 'USER', verification_uri: 'https://relay.example/verify', verification_uri_complete: 'https://relay.example/verify?code=USER', expires_in: 30, interval: 2 };
@@ -113,6 +112,9 @@ test('agent saves newly approved credentials once when a relay rejects its old t
     };
     require('node:module').syncBuiltinESMExports();
   `);
+  let resolveReconnected;
+  let heldSocket;
+  const reconnected = new Promise((resolve) => { resolveReconnected = resolve; });
   let upgrades = 0;
   const server = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
@@ -121,8 +123,12 @@ test('agent saves newly approved credentials once when a relay rejects its old t
     res.writeHead(404).end('{}');
   });
   server.on('upgrade', (req, socket) => {
-    upgrades++;
-    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    if (++upgrades === 1) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    heldSocket = socket;
+    resolveReconnected(req.headers.authorization);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const relayUrl = `http://127.0.0.1:${server.address().port}`;
@@ -143,11 +149,21 @@ test('agent saves newly approved credentials once when a relay rejects its old t
       child.kill();
       await exited;
     }
+    heldSocket?.destroy();
     await new Promise((resolve) => server.close(resolve));
     rmSync(root, { recursive: true, force: true });
   });
-  for (let i = 0; i < 150 && upgrades < 2 && child.exitCode === null; i++) await sleep(100);
-  assert.ok(upgrades >= 2, `agent did not reconnect after re-pairing:\n${output}`);
+  let timeout;
+  try {
+    const authorization = await Promise.race([
+      reconnected,
+      new Promise((_, reject) => child.once('exit', (code) => reject(new Error(`agent exited (${code}):\n${output}`)))),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`agent did not reconnect:\n${output}`)), 15000); }),
+    ]);
+    assert.equal(authorization, 'Bearer new-token');
+  } finally {
+    clearTimeout(timeout);
+  }
   assert.equal(readFileSync(trace, 'utf8'), 'write\n');
   const saved = JSON.parse(readFileSync(file, 'utf8'));
   assert.equal(saved.deviceToken, 'new-token');
