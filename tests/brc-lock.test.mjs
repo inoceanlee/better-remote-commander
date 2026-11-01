@@ -18,8 +18,8 @@ async function sandbox(t) {
 
 test('lock publishes owner atomically and serializes independent instances', async (t) => {
   const paths = await sandbox(t);
-  const first = new LifecycleLock(paths, { waitMs: 1500, pollMs: 20 });
-  const second = new LifecycleLock(paths, { waitMs: 1500, pollMs: 20 });
+  const first = new LifecycleLock(paths, { waitMs: 5000, pollMs: 20 });
+  const second = new LifecycleLock(paths, { waitMs: 5000, pollMs: 20 });
   const steps = [];
   let notify;
   const entered = new Promise((done) => { notify = done; });
@@ -146,4 +146,17 @@ test('reclaims an abandoned directory lock only after its owner exits', async (t
     assert.equal((await stat(lock)).isDirectory(), true);
   });
   await assert.rejects(() => stat(lock), { code: 'ENOENT' });
+});
+
+test('a linked data root cannot redirect lock creation outside the sandbox', async (t) => {
+  const { symlink } = await import('node:fs/promises');
+  const paths = await sandbox(t);
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'brc-lock-external-'));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  const link = path.join(paths.root, 'linked-root');
+  await symlink(outside, link, 'junction');
+  await assert.rejects(() => new LifecycleLock({
+    ...paths, root: link, runtime: path.join(link, 'runtime'),
+  }).runExclusive(async () => {}), /plain directory/);
+  await assert.rejects(() => stat(path.join(outside, 'runtime')), { code: 'ENOENT' });
 });

@@ -3,12 +3,24 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { BrcPaths } from '../config/paths.js';
 import { DEFAULT_SETTINGS } from '../config/settings.js';
-import { inspectProcess } from './identity.js';
+import { inspectProcess, type ProcessIdentity } from './identity.js';
 import { LockStore, type LockOwner } from './lock-store.js';
 
 export interface LockWaitOptions { waitMs?: number; pollMs?: number }
 
 export class LifecycleLock {
+  private static ownIdentity: Promise<ProcessIdentity> | undefined;
+  private static inspectSelf(): Promise<ProcessIdentity> {
+    this.ownIdentity ??= inspectProcess(process.pid).then((identity) => {
+      if (!identity) throw new Error('Cannot verify the CLI process identity for lifecycle locking.');
+      return identity;
+    }).catch((error: unknown) => {
+      this.ownIdentity = undefined;
+      throw error;
+    });
+    return this.ownIdentity;
+  }
+
   private queue: Promise<void> = Promise.resolve();
   private readonly context = new AsyncLocalStorage<LifecycleLock>();
   private readonly store: LockStore;
@@ -38,8 +50,7 @@ export class LifecycleLock {
   }
 
   private async execute<T>(operation: () => Promise<T>): Promise<T> {
-    const identity = await inspectProcess(process.pid);
-    if (!identity) throw new Error('Cannot verify the CLI process identity for lifecycle locking.');
+    const identity = await LifecycleLock.inspectSelf();
     const owner: LockOwner = { version: 1, ...identity, workspaceRoot: this.paths.root, token: randomUUID() };
     const started = Date.now();
     while (!await this.store.acquire(owner)) {
