@@ -73,6 +73,9 @@ test('help and invalid arguments do not initialize configuration', async (t) => 
   const invalid = runCliProcess(['start', 'extra'], root);
   assert.equal(invalid.status, 2, invalid.stderr);
   assert.match(invalid.stderr, /does not accept extra arguments/);
+  const invalidValue = runCliProcess(['config', 'set', 'proxy.rate.average', 'invalid'], root);
+  assert.notEqual(invalidValue.status, 0);
+  assert.match(invalidValue.stderr, /average|number/i);
 });
 test('non-interactive uninstall requires --yes and preserves private data', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brc-cli-uninstall-'));

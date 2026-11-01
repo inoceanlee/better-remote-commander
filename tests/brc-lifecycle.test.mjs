@@ -54,6 +54,7 @@ const control = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
+    if (mode === 'exit-on-health') res.on('finish', () => process.exit(0));
     res.end(JSON.stringify({ ok: true, state: 'running', detail: 'fake service ready' }));
     return;
   }
@@ -256,6 +257,12 @@ test('startup health polling does not repeat process identity inspection', async
   });
   await harness.manager.start(harness.spec);
   assert.equal(inspections, 1);
+});
+
+test('startup rejects a child that exits during readiness and removes its record', async (t) => {
+  const harness = await makeHarness(t, { mode: 'exit-on-health', startupTimeoutMs: 5000 });
+  await assert.rejects(harness.manager.start(harness.spec), /exited|healthy/i);
+  await assert.rejects(readFile(path.join(harness.paths.runtime, 'relay.json'), 'utf8'), { code: 'ENOENT' });
 });
 
 test('runtime timeout updates apply to the next managed process start', async (t) => {

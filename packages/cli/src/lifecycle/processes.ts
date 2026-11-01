@@ -196,6 +196,7 @@ export class ProcessManager {
     this.starting.set(spec.name, null);
     let child: ChildProcess | undefined;
     let record: ManagedProcessRecord | undefined;
+    let readyRemoved = false;
     const id = randomUUID();
     const token = randomBytes(32).toString('hex');
     const readyFile = path.join(this.paths.runtime, `${spec.name}.${id}.ready.json`);
@@ -257,6 +258,11 @@ export class ProcessManager {
       };
       await this.writeRecord(record);
       await this.waitForHealthy(record, spec, child, () => exit, deadline);
+      await this.removeReadyFile(readyFile);
+      readyRemoved = true;
+      if (exit || child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`${spec.name} exited during startup.`);
+      }
     } catch (error) {
       let cleanupError: unknown;
       try {
@@ -269,7 +275,7 @@ export class ProcessManager {
       throw error;
     } finally {
       this.starting.delete(spec.name);
-      await this.removeReadyFile(readyFile);
+      if (!readyRemoved) await this.removeReadyFile(readyFile);
     }
   }
 

@@ -7,7 +7,7 @@ import { requestAdministrator } from './commands/setup/input.js';
 import { resolveBrcPaths, type BrcPaths } from './config/paths.js';
 import { SettingsManager } from './config/manager.js';
 import { readSettings } from './config/reader.js';
-import { isBrcSettingKey, type BrcSettings } from './config/settings.js';
+import { isBrcSettingKey, parseSettingArgument, type BrcSettings } from './config/settings.js';
 import { LifecycleLock } from './lifecycle/lock.js';
 import { ProcessManager } from './lifecycle/processes.js';
 import { createDefaultServices, ServiceManager } from './lifecycle/services.js';
@@ -198,9 +198,18 @@ async function main(): Promise<void> {
     || (configCommand === 'set' && (commandArgs.length !== 3 || !isBrcSettingKey(commandArgs[1] ?? '')))
     || !['show', 'apply', 'path', 'get', 'set'].includes(configCommand)
   );
+  let invalidConfigValue = false;
+  if (command === 'config' && configCommand === 'set' && commandArgs.length === 3 && isBrcSettingKey(commandArgs[1])) {
+    try {
+      parseSettingArgument(commandArgs[1], commandArgs[2]);
+    } catch {
+      invalidConfigValue = true;
+    }
+  }
   const simpleCommands = ['setup', 'start', 'stop', 'restart', 'status', 'clean'];
   const lightweight = command === 'help' || command === '-h' || command === '--help'
     || invalidConfig
+    || invalidConfigValue
     || (command !== undefined && !['setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'clean', 'uninstall'].includes(command))
     || (simpleCommands.includes(command ?? '') && commandArgs.length !== 0)
     || (command === 'logs' && (commandArgs.length > 1 || (commandArgs[0] && !isLogComponent(commandArgs[0]))))

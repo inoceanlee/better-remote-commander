@@ -1,3 +1,5 @@
+import { lstat } from 'node:fs/promises';
+import path from 'node:path';
 import type { BrcPaths } from './paths.js';
 import {
   BRC_SETTING_KEYS,
@@ -75,6 +77,15 @@ export class SettingsManager {
       throw new Error('SettingsManager requires a lifecycle lock and an apply operation.');
     }
     const runtimeEnv = { ...env };
+    const lockActive = async () => {
+      try {
+        await lstat(path.join(paths.runtime, 'lifecycle.lock'));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw error;
+      }
+    };
     const read = async () => {
       const lastGood = await readLastGoodSettings(paths, runtimeEnv);
       let loaded: LoadedSettings;
@@ -86,8 +97,24 @@ export class SettingsManager {
       }
       return { loaded, lastGood };
     };
-    let initial = await read();
-    if (!initial.lastGood && initial.loaded.rawContents !== null) {
+    const readCommitted = async () => {
+      const lastGood = await readLastGoodSettings(paths, runtimeEnv);
+      return { loaded: lastGood ?? defaultSettings(runtimeEnv), lastGood };
+    };
+    let initial: { loaded: LoadedSettings; lastGood: LoadedSettings | null };
+    if (await lockActive()) {
+      initial = await readCommitted();
+    } else {
+      try {
+        initial = await read();
+      } catch (error) {
+        if (!await lockActive()) throw error;
+        initial = await readCommitted();
+      }
+      if (await lockActive()) initial = await readCommitted();
+    }
+    if (await lockActive()) initial = await readCommitted();
+    else if (!initial.lastGood && initial.loaded.rawContents !== null) {
       initial = await dependencies.lock.runExclusive(async () => {
         const current = await read();
         if (!current.lastGood && current.loaded.rawContents !== null) {
