@@ -18,7 +18,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
-import { SqliteStore, verifyPassword } from './store/sqlite.js';
+import { SqliteStore, verifyPassword, type AuditRetentionPolicy } from './store/sqlite.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
@@ -36,11 +36,25 @@ export interface RelayConfig {
   adminUser: string;
   adminPassword: string;
   relayVersion: string;
+ audit: AuditRetentionPolicy | undefined;
 }
 
-export function loadConfig(): RelayConfig {
-  const env = process.env;
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const port = Number(env.PORT ?? 3000);
+ const retentionDays = env.BRC_AUDIT_RETENTION_DAYS;
+ const maxEntries = env.BRC_AUDIT_MAX_ENTRIES;
+ let audit: AuditRetentionPolicy | undefined;
+ if (retentionDays !== undefined && maxEntries !== undefined) {
+  audit = { retentionDays: Number(retentionDays), maxEntries: Number(maxEntries) };
+  if (!Number.isSafeInteger(audit.retentionDays) || audit.retentionDays < 0) {
+   throw new Error('BRC_AUDIT_RETENTION_DAYS must be a non-negative integer.');
+  }
+  if (!Number.isSafeInteger(audit.maxEntries) || audit.maxEntries < 1) {
+   throw new Error('BRC_AUDIT_MAX_ENTRIES must be a positive integer.');
+  }
+ } else if (retentionDays !== undefined || maxEntries !== undefined) {
+  throw new Error('Both BRC_AUDIT_RETENTION_DAYS and BRC_AUDIT_MAX_ENTRIES are required.');
+ }
   return {
     port,
     host: env.HOST ?? '0.0.0.0',
@@ -50,7 +64,8 @@ export function loadConfig(): RelayConfig {
     sessionSecret: env.BRC_SESSION_SECRET ?? '',
     adminUser: env.BRC_ADMIN_USER ?? 'admin',
     adminPassword: env.BRC_ADMIN_PASSWORD ?? '',
-    relayVersion: process.env.BRC_PRODUCT_VERSION ?? 'unknown',
+  relayVersion: env.BRC_PRODUCT_VERSION ?? 'unknown',
+  audit,
   };
 }
 
@@ -60,6 +75,8 @@ const DEVICE_POLL_INTERVAL_S = 5;
 export interface Relay { http: HttpServer; hub: DeviceHub; store: SqliteStore; close(): Promise<void> }
 
 export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) => void): Relay {
+ const audit = cfg.audit;
+ if (!audit) throw new Error('Relay audit settings are required for service startup.');
   const store = SqliteStore.open(cfg.dbFile);
   let admin: ReturnType<SqliteStore['getAdministrator']>;
   let sessionSecret: string;
@@ -321,7 +338,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     });
   });
 
-  const housekeeping = setInterval(() => store.vacuumExpired(), 10 * 60_000);
+ const housekeeping = setInterval(() => store.vacuumExpired(audit), 10 * 60_000);
   housekeeping.unref();
 
   log('info', `admin user "${admin.username}" ready; db ${cfg.dbFile}`);

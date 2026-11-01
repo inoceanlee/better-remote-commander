@@ -56,6 +56,7 @@ function config(dbFile, sessionSecret = 'shared-session-secret') {
     sessionSecret,
     adminUser: 'admin',
     adminPassword: 'password',
+    audit: { retentionDays: 30, maxEntries: 50_000 },
     relayVersion: 'test',
   };
 }
@@ -208,7 +209,7 @@ test('a signed cookie for a user absent from this database is treated as logged 
   const { directory, file } = tempDatabase();
   createLegacyDatabase(file, { userId: 'current-admin-id' });
   const secret = 'shared-session-secret';
-  const relay = buildRelay(config(file, secret), () => {});
+  const relay = buildRelay(config(file, secret), () => { });
   try {
     const port = await listen(relay);
     const stale = await fetch(`http://127.0.0.1:${port}/admin`, { redirect: 'manual', headers: { cookie: sessionCookie('old-database-user-id', secret) } });
@@ -225,7 +226,7 @@ test('a signed cookie for a user absent from this database is treated as logged 
 test('Relay rejects a device WebSocket whose stored owner no longer exists', async () => {
   const { directory, file } = tempDatabase();
   createLegacyDatabase(file, { userId: 'current-admin-id' });
-  const relay = buildRelay(config(file), () => {});
+  const relay = buildRelay(config(file), () => { });
   try {
     const token = 'orphan-device-token';
     const db = new DatabaseSync(file);
@@ -420,7 +421,7 @@ test('browser login survives password-free Relay restart using the stored sessio
   const configWithoutSecrets = { ...config(file, ''), adminUser: 'ignored', adminPassword: '' };
   let relay;
   try {
-    relay = buildRelay(configWithoutSecrets, () => {});
+    relay = buildRelay(configWithoutSecrets, () => { });
     const port = await listen(relay);
     const response = await fetch(`http://127.0.0.1:${port}/auth/login`, {
       method: 'POST',
@@ -433,7 +434,7 @@ test('browser login survives password-free Relay restart using the stored sessio
     await relay.close();
     relay = null;
 
-    relay = buildRelay(configWithoutSecrets, () => {});
+    relay = buildRelay(configWithoutSecrets, () => { });
     const restartedPort = await listen(relay);
     const home = await fetch(`http://127.0.0.1:${restartedPort}/admin`, {
       headers: { cookie },
@@ -464,5 +465,102 @@ test('start and restart reject a missing Relay database without creating one', (
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+function addAudit(store, ts, tool = 'test') {
+  store.audit({
+    ts,
+    user_id: 'admin-id',
+    device_id: null,
+    client: 'test-client',
+    tool,
+    args_hash: null,
+    ok: 1,
+    ms: 1,
+    error: null,
+  });
+}
+
+test('audit housekeeping enforces zero, one, 50000 and 50001 row boundaries', () => {
+  const store = SqliteStore.open(':memory:');
+  const policy = { retentionDays: 30, maxEntries: 50_000 };
+  try {
+    store.vacuumExpired(policy);
+    assert.equal(store.auditStats('admin-id').total, 0);
+
+    const now = Date.now();
+    addAudit(store, now, 'first');
+    store.vacuumExpired(policy);
+    assert.equal(store.auditStats('admin-id').total, 1);
+
+    for (let index = 1; index < 50_000; index += 1) addAudit(store, now + index, `entry-${index}`);
+    store.vacuumExpired(policy);
+    assert.equal(store.auditStats('admin-id').total, 50_000);
+
+    addAudit(store, now + 50_000, 'newest');
+    store.vacuumExpired(policy);
+    assert.equal(store.auditStats('admin-id').total, 50_000);
+    assert.equal(store.recentAudit('admin-id', 1)[0].tool, 'newest');
+  } finally {
+    store.close();
+  }
+});
+
+test('audit housekeeping deletes expired rows in bounded batches', () => {
+  const store = SqliteStore.open(':memory:');
+  try {
+    const expiredAt = Date.now() - 31 * 86_400_000;
+    for (let index = 0; index < 1_001; index += 1) addAudit(store, expiredAt + index);
+
+    store.vacuumExpired({ retentionDays: 30, maxEntries: 50_000 });
+    assert.equal(store.auditStats('admin-id').total, 1);
+
+    store.vacuumExpired({ retentionDays: 30, maxEntries: 50_000 });
+    assert.equal(store.auditStats('admin-id').total, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('audit housekeeping removes expired rows and retains newer rows', () => {
+  const store = SqliteStore.open(':memory:');
+  try {
+    const now = Date.now();
+    addAudit(store, now - 31 * 86_400_000, 'expired');
+    addAudit(store, now - 29 * 86_400_000, 'retained');
+
+    store.vacuumExpired({ retentionDays: 30, maxEntries: 10 });
+
+    assert.deepEqual(store.recentAudit('admin-id').map(({ tool }) => tool), ['retained']);
+  } finally {
+    store.close();
+  }
+});
+
+test('audit housekeeping preserves users, devices, auth codes and tokens', () => {
+  const store = SqliteStore.open(':memory:');
+  try {
+    const user = store.upsertUser('admin', 'password');
+    const deviceToken = store.issueDeviceToken('device-id', user.id, 'Agent', 'win32');
+    const expiresAt = Date.now() + 60_000;
+    store.insertAuthCode({
+      code: 'auth-code', client_id: 'client', user_id: user.id, code_challenge: 'challenge',
+      redirect_uri: 'https://client.invalid/callback', scopes: 'mcp:tools', resource: null, expires_at: expiresAt,
+    });
+    store.insertToken({
+      token_hash: sha256('access-token'), kind: 'access', client_id: 'client', user_id: user.id,
+      scopes: 'mcp:tools', resource: null, expires_at: expiresAt, created_at: Date.now(), revoked: 0,
+    });
+    addAudit(store, 1);
+
+    store.vacuumExpired({ retentionDays: 0, maxEntries: 1 });
+
+    assert.equal(store.getUser(user.id).username, 'admin');
+    assert.equal(store.getDeviceByToken(deviceToken).device_id, 'device-id');
+    assert.equal(store.peekAuthCode('auth-code').user_id, user.id);
+    assert.equal(store.getToken('access-token', 'access').user_id, user.id);
+    assert.equal(store.recentAudit(user.id).length, 0);
+  } finally {
+    store.close();
   }
 });

@@ -28,6 +28,12 @@ export interface TokenRow { token_hash: string; kind: 'access' | 'refresh'; clie
 export interface DeviceRow { device_id: string; user_id: string; name: string; token_hash: string; platform: string | null; created_at: number; last_seen: number | null; paused: number }
 export interface DeviceCodeRow { device_code: string; user_code: string; client_name: string; user_id: string | null; approved: number; denied: number; device_id: string | null; expires_at: number; created_at: number }
 export interface AuditRow { id: number; ts: number; user_id: string | null; device_id: string | null; client: string | null; tool: string; args_hash: string | null; ok: number; ms: number | null; error: string | null }
+export interface AuditRetentionPolicy {
+ retentionDays: number;
+ maxEntries: number;
+}
+
+const AUDIT_CLEANUP_BATCH_SIZE = 1_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -448,12 +454,25 @@ export class SqliteStore {
     return this.#db.prepare('SELECT * FROM audit WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, limit) as unknown as AuditRow[];
   }
 
-  /** Housekeeping: drop expired codes/tokens. */
-  vacuumExpired(): void {
+ /** Housekeeping: drop expired codes, tokens, and bounded audit batches. */
+ vacuumExpired(audit: AuditRetentionPolicy): void {
     const now = Date.now();
     this.#db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(now);
     this.#db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(now);
     this.#db.prepare('DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < ?').run(now - 7 * 86_400_000);
+
+  const retentionCutoff = Math.max(Number.MIN_SAFE_INTEGER, now - audit.retentionDays * 86_400_000);
+  this.#db.prepare(
+   'DELETE FROM audit WHERE id IN (SELECT id FROM audit INDEXED BY audit_ts WHERE ts < ? ORDER BY ts, id LIMIT ?)',
+  ).run(retentionCutoff, AUDIT_CLEANUP_BATCH_SIZE);
+
+  const { count } = this.#db.prepare('SELECT COUNT(*) AS count FROM audit').get() as { count: number };
+  const excess = Math.min(AUDIT_CLEANUP_BATCH_SIZE, count - audit.maxEntries);
+  if (excess > 0) {
+   this.#db.prepare(
+    'DELETE FROM audit WHERE id IN (SELECT id FROM audit ORDER BY id ASC LIMIT ?)',
+   ).run(excess);
+  }
   }
 
   /* ---------- OAuth clients (management) ---------- */

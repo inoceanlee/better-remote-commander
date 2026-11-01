@@ -49,6 +49,8 @@ export function createDefaultServices(
   const relayEnv: NodeJS.ProcessEnv = {
     ...baseEnv,
     BRC_LOG_ROTATE_MIB: String(settings.logs.rotateMiB),
+    BRC_AUDIT_RETENTION_DAYS: String(settings.audit.retentionDays),
+    BRC_AUDIT_MAX_ENTRIES: String(settings.audit.maxEntries),
     HOST: '127.0.0.1',
     PORT: String(relay),
     PUBLIC_URL: settings.services.publicUrl || proxyUrl,

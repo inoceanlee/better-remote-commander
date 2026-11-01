@@ -8,6 +8,7 @@ import { createDefaultServices } from '../packages/cli/dist/lifecycle/services.j
 import { resolveBrcPaths } from '../packages/cli/dist/config/paths.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { SettingsManager } from '../packages/cli/dist/config/manager.js';
+import { loadConfig } from '../packages/relay/dist/app.js';
 import { runConfigCommand } from '../packages/cli/dist/commands/config.js';
 
 async function createFixture(t, options = {}) {
@@ -16,7 +17,7 @@ async function createFixture(t, options = {}) {
   const paths = resolveBrcPaths(env);
   await mkdir(paths.config, { recursive: true });
   const lock = new LifecycleLock(paths);
-  const apply = options.apply ?? (async () => {});
+  const apply = options.apply ?? (async () => { });
   const manager = await SettingsManager.load(paths, env, { lock, apply });
   return { env, paths, lock, apply, manager };
 }
@@ -42,6 +43,10 @@ test('central settings defaults match the public configuration contract', () => 
       retentionDays: 7,
       maxTotalMiB: 50,
       rotateMiB: 4,
+    },
+    audit: {
+      retentionDays: 30,
+      maxEntries: 50_000,
     },
     runtime: {
       startupTimeoutMs: 15_000,
@@ -137,6 +142,45 @@ test('registered environment values override file values and defaults', async (t
 
   assert.deepEqual(manager.get('proxy.rate.average'), { value: 24, source: 'environment' });
   assert.deepEqual(manager.get('proxy.rate.burst'), { value: 30, source: 'default' });
+});
+test('audit policy defaults and environment overrides reach Relay', async (t) => {
+  const { paths, lock, apply } = await createFixture(t);
+  const manager = await SettingsManager.load(paths, {
+    BRC_DATA_ROOT: paths.root,
+    BRC_AUDIT_RETENTION_DAYS: '90',
+    BRC_AUDIT_MAX_ENTRIES: '1200',
+  }, { lock, apply });
+
+  assert.deepEqual(manager.get('audit.retentionDays'), { value: 90, source: 'environment' });
+  assert.deepEqual(manager.get('audit.maxEntries'), { value: 1200, source: 'environment' });
+  assert.equal(DEFAULT_SETTINGS.audit.retentionDays, 30);
+  assert.equal(DEFAULT_SETTINGS.audit.maxEntries, 50_000);
+
+  const relay = createDefaultServices(paths, manager.snapshot(), {}).find((service) => service.name === 'relay');
+  assert.equal(relay.env.BRC_AUDIT_RETENTION_DAYS, '90');
+  assert.equal(relay.env.BRC_AUDIT_MAX_ENTRIES, '1200');
+  assert.deepEqual(loadConfig(relay.env).audit, { retentionDays: 90, maxEntries: 1200 });
+});
+
+test('audit policy accepts boundaries and rejects values outside its range', async (t) => {
+  const { paths, lock, apply } = await createFixture(t);
+
+  for (const maxEntries of ['1', '50000']) {
+    await assert.doesNotReject(SettingsManager.load(paths, {
+      BRC_DATA_ROOT: paths.root,
+      BRC_AUDIT_MAX_ENTRIES: maxEntries,
+    }, { lock, apply }));
+  }
+  for (const maxEntries of ['0', '50001']) {
+    await assert.rejects(SettingsManager.load(paths, {
+      BRC_DATA_ROOT: paths.root,
+      BRC_AUDIT_MAX_ENTRIES: maxEntries,
+    }, { lock, apply }), /audit\.maxEntries|BRC_AUDIT_MAX_ENTRIES/i);
+  }
+  await assert.rejects(SettingsManager.load(paths, {
+    BRC_DATA_ROOT: paths.root,
+    BRC_AUDIT_RETENTION_DAYS: '-1',
+  }, { lock, apply }), /audit\.retentionDays|BRC_AUDIT_RETENTION_DAYS/i);
 });
 
 test('file values override defaults and report file sources', async (t) => {
