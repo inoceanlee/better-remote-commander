@@ -3,10 +3,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
-import { copyFile, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, copyFile, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import net, { createConnection } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
@@ -315,6 +316,35 @@ test('setup reports operation stages and download failures without changing the 
   release.setVersion('3.7.17', { checksum: '0'.repeat(64) });
   await assert.rejects(manager.update(), /checksum/i);
   assert.ok(events.some((event) => event.operation === 'update' && event.stage === 'stage' && event.status === 'failed'));
+});
+
+test('missing deployment templates leave the installed version and both configurations unchanged', async (t) => {
+  const { root, paths: brcPaths } = await makeRoot(t);
+  const release = makeRelease('3.7.16');
+  await makeManager(brcPaths, release).setup();
+  const files = [
+    path.join(brcPaths.traefik, 'versions', '3.7.16', 'traefik.exe'),
+    path.join(brcPaths.traefik, 'versions.json'),
+    path.join(brcPaths.traefik, 'config', 'dynamic.yml'),
+    path.join(brcPaths.traefik, 'config', 'traefik.yml'),
+  ];
+  const before = await Promise.all(files.map((file) => readFile(file)));
+
+  // Copy compiled code without deployment templates; dependencies remain read-only.
+  const cliRoot = fileURLToPath(new URL('../packages/cli/', import.meta.url));
+  const isolatedPackage = path.join(root, 'sandbox', 'package');
+  await mkdir(isolatedPackage, { recursive: true });
+  await cp(path.join(cliRoot, 'dist'), path.join(isolatedPackage, 'dist'), { recursive: true });
+  await copyFile(path.join(cliRoot, 'package.json'), path.join(isolatedPackage, 'package.json'));
+  await symlink(path.join(cliRoot, 'node_modules'), path.join(isolatedPackage, 'node_modules'), 'junction');
+  const { TraefikManager: IsolatedManager } = await import(pathToFileURL(path.join(isolatedPackage, 'dist', 'traefik', 'manager.js')).href);
+  const manager = new IsolatedManager(brcPaths, settingsFor(), makeLifecycle(), {
+    fetch: release.fetch,
+    verifyExecutable: async () => {},
+    healthCheck: async () => {},
+  });
+  await assert.rejects(manager.writeConfig(), /templates are missing/i);
+  assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
 });
 
 test('unsafe archives and checksum failures preserve installed files and both configurations', async (t) => {
