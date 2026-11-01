@@ -118,6 +118,29 @@ test('rewrites do not widen existing POSIX permissions', async (t) => {
   assert.equal((await stat(storage.file)).mode & 0o777, 0o600);
 });
 
+test('Windows DACL deny-write remains enforced across history rewrite', { skip: process.platform !== 'win32' }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'brc-history-dacl-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const storage = new ToolHistoryStorage(directory);
+  storage.withLock(() => storage.rewriteText('original\n'));
+  const user = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(user.status, 0, user.stderr);
+  const sid = '*' + user.stdout.trim();
+  assert.match(sid, /^\*S-1-/);
+  const acl = (args) => spawnSync('icacls.exe', [storage.file, ...args], { encoding: 'utf8', windowsHide: true });
+  const denied = acl(['/deny', `${sid}:(W)`]);
+  assert.equal(denied.status, 0, denied.stderr);
+  try {
+    assert.throws(() => storage.withLock(() => storage.rewriteText('changed\n')), (error) => ['EACCES','EPERM'].includes(error?.code));
+  } finally {
+    const restored = acl(['/remove:d', sid]);
+    assert.equal(restored.status, 0, restored.stderr);
+  }
+  assert.equal(await readFile(storage.file, 'utf8'), 'original\n');
+  storage.withLock(() => storage.rewriteText('updated\n'));
+  assert.equal(await readFile(storage.file, 'utf8'), 'updated\n');
+});
+
 test('lock cleanup removes dead writers temporary files without following links', async (t) => {
   const directory = path.join(root, 'abandoned');
   const storage = new ToolHistoryStorage(directory);
