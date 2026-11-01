@@ -3,6 +3,11 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { pathToFileURL } from 'node:url';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'brc-history-'));
 process.env.BRC_HOME = path.join(root, 'home');
@@ -69,6 +74,62 @@ test('simultaneous additions retain their order in the persisted queue', async (
   await toolHistory.cleanup();
   const records = (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(records.map(record => record.toolName), Array.from({ length: 20 }, (_, i) => `parallel-${i}`));
+});
+
+test('existing filesystem root does not require recursive mkdir', () => {
+  const directory = path.parse(root).root;
+  const storage = new ToolHistoryStorage(directory);
+  assert.equal(storage.file, path.join(directory, 'tool-history.jsonl'));
+});
+
+test('partial temporary write leaves committed history intact and can be retried', () => {
+  const storage = new ToolHistoryStorage(path.join(root, 'partial'));
+  storage.withLock(() => storage.rewriteText('{"n":1}\n'));
+  const original = fs.writeFileSync;
+  try {
+    fs.writeFileSync = (name, data, options) => {
+      if (String(name).endsWith('.tmp')) {
+        original(name, String(data).slice(0, 4), options);
+        throw new Error('simulated partial write');
+      }
+      return original(name, data, options);
+    };
+    syncBuiltinESMExports();
+    assert.throws(() => storage.withLock(() => storage.appendText('{"n":2}\n')), /simulated partial write/);
+  } finally {
+    fs.writeFileSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(storage.readText(), '{"n":1}\n');
+  storage.withLock(() => storage.appendText('{"n":2}\n'));
+  assert.equal(storage.readText(), '{"n":1}\n{"n":2}\n');
+});
+
+test('another process appends after compaction without losing its record', async () => {
+  const directory = path.join(root, 'concurrent');
+  const storage = new ToolHistoryStorage(directory);
+  storage.withLock(() => storage.rewriteText('old\nkeep\n'));
+  const moduleUrl = pathToFileURL(path.resolve('packages/agent/dist/core/utils/toolHistoryStorage.js')).href;
+  const compact = `
+    import { ToolHistoryStorage } from ${JSON.stringify(moduleUrl)};
+    const storage = new ToolHistoryStorage(process.argv[1]);
+    storage.withLock(() => {
+      const text = storage.readText();
+      process.stdout.write('locked\\n');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      storage.rewriteText(text.split('\\n').slice(1).join('\\n'));
+    });`;
+  const append = `
+    import { ToolHistoryStorage } from ${JSON.stringify(moduleUrl)};
+    const storage = new ToolHistoryStorage(process.argv[1]);
+    storage.withLock(() => storage.appendText('new\\n'));`;
+  const first = spawn(process.execPath, ['--input-type=module', '-e', compact, directory], { stdio: ['ignore', 'pipe', 'pipe'] });
+  await once(first.stdout, 'data');
+  const second = spawn(process.execPath, ['--input-type=module', '-e', append, directory], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const [firstExit, secondExit] = await Promise.all([once(first, 'exit'), once(second, 'exit')]);
+  assert.equal(firstExit[0], 0);
+  assert.equal(secondExit[0], 0);
+  assert.equal(storage.readText(), 'keep\nnew\n');
 });
 
 test.after(async () => {

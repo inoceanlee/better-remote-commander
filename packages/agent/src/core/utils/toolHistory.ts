@@ -87,6 +87,13 @@ class ToolHistory {
    */
   private loadFromDisk(): void {
     try {
+      this.storage.withLock(() => this.loadLocked());
+    } catch (error) {
+      // Silently fail
+    }
+  }
+
+  private loadLocked(): void {
       if (this.storage.size() === 0) return;
 
       // If the file is over the cap, trim it down before reading so we
@@ -120,9 +127,6 @@ class ToolHistory {
       if (lines.length > this.MAX_ENTRIES * 2) {
         this.trimHistoryFile();
       }
-    } catch (error) {
-      // Silently fail
-    }
   }
 
   /**
@@ -195,15 +199,12 @@ class ToolHistory {
     this.writeQueue = [];
 
     try {
-      // If the on-disk file has grown past the cap, trim it down to the
-      // target size (keeping the most recent entries) before appending.
-      // The in-memory cache is unaffected — it is already bounded by
-      // MAX_ENTRIES via addCall.
-      this.trimHistoryFileIfTooLarge();
-
-      // Append to file (atomic append operation)
-      const lines = toWrite.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-      this.storage.appendText(lines);
+      this.storage.withLock(() => {
+        // Read and compact while holding the same lock as every writer.
+        this.trimHistoryFileIfTooLarge();
+        const lines = toWrite.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+        this.storage.appendText(lines);
+      });
     } catch (error) {
       // Put back in queue on failure
       this.writeQueue.unshift(...toWrite);
