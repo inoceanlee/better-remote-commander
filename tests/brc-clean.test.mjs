@@ -169,6 +169,38 @@ test('removes a valid process record only after its process exits', async (t) =>
   assert.equal(await exists(path.join(harness.paths.runtime, 'relay.json')), false);
 });
 
+test('preserves live and malformed ready and lock records', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const ready = path.join(brcPaths.runtime, 'relay.live.ready.json');
+  const malformed = path.join(brcPaths.runtime, 'agent.bad.ready.json');
+  const lock = path.join(brcPaths.runtime, 'lifecycle.lock');
+  await writeFile(ready, JSON.stringify({ pid: process.pid }));
+  await writeFile(malformed, '{broken');
+  await writeFile(lock, JSON.stringify({ pid: process.pid, createdAt: 'wrong', executablePath: process.execPath, commandLine: 'wrong' }));
+
+  const report = await cleanRuntime(brcPaths);
+
+  for (const filename of [ready, malformed, lock]) {
+    assert.equal(await exists(filename), true);
+    assert.ok(report.preserved.some((item) => item.path === filename));
+  }
+});
+
+test('removes ready and lock records for an exited process', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const child = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(child.status, 0);
+  const ready = path.join(brcPaths.runtime, 'relay.exited.ready.json');
+  const lock = path.join(brcPaths.runtime, 'lifecycle.lock');
+  await writeFile(ready, JSON.stringify({ pid: child.pid }));
+  await writeFile(lock, JSON.stringify({ pid: child.pid, createdAt: 'old', executablePath: process.execPath, commandLine: 'old' }));
+
+  await cleanRuntime(brcPaths);
+
+  assert.equal(await exists(ready), false);
+  assert.equal(await exists(lock), false);
+});
+
 test('does not follow a directory junction outside the data root', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   const outside = await mkdtemp(path.join(os.tmpdir(), 'brc-clean-outside-'));

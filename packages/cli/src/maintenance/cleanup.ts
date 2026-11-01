@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { BrcPaths } from '../config/paths.js';
 import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
 import { inspectProcess, ProcessManager, type ManagedServiceName, type ProcessIdentity } from '../lifecycle/processes.js';
+import { inspectProcesses } from '../lifecycle/identity.js';
 
 const SERVICE_NAMES: ManagedServiceName[] = ['relay', 'traefik', 'agent'];
 
@@ -156,67 +157,102 @@ function recordSpec(name: ManagedServiceName, value: unknown, paths: BrcPaths) {
   return { name, entrypoint, workspaceRoot, cwd: workspaceRoot };
 }
 
-async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dryRun: boolean): Promise<Map<ManagedServiceName, ServiceRuntime>> {
+async function runtimeSnapshot(paths: BrcPaths, report: CleanupReport): Promise<Map<number, ProcessIdentity | null> | Error> {
+  if (!await safeDirectory(paths.root, paths.runtime, report)) return new Map();
+  let entries;
+  try {
+    entries = await readdir(paths.runtime, { withFileTypes: true });
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  const names = new Set(SERVICE_NAMES.map((name) => `${name}.json`));
+  const pids = new Set<number>();
+  await Promise.all(entries.map(async (entry) => {
+    if (!names.has(entry.name) && entry.name !== 'lifecycle.lock'
+        && !entry.name.endsWith('.ready.json') && !entry.name.endsWith('.ready.json.tmp')) return;
+    if (!entry.isFile() || entry.isSymbolicLink()) return;
+    try {
+      const value = JSON.parse((await readRegularFile(path.join(paths.runtime, entry.name))).contents) as unknown;
+      if (value && typeof value === 'object' && 'pid' in value
+          && typeof value.pid === 'number' && Number.isSafeInteger(value.pid) && value.pid > 0) pids.add(value.pid);
+    } catch { /* Individual records are reported by their owner. */ }
+  }));
+  try {
+    return await inspectProcesses([...pids]);
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+function snapshotIdentity(snapshot: Map<number, ProcessIdentity | null> | Error, pid: number): ProcessIdentity | null {
+  if (snapshot instanceof Error) throw snapshot;
+  if (!snapshot.has(pid)) throw new Error('PID was not included in the identity snapshot.');
+  return snapshot.get(pid) ?? null;
+}
+
+async function removeUnchangedRecord(
+  paths: BrcPaths, filename: string, contents: string, pid: number, report: CleanupReport, dryRun: boolean,
+): Promise<boolean> {
+  if (await inspectProcess(pid)) {
+    issue(report.preserved, filename, 'Process is live or its PID was reused during cleanup.');
+    return false;
+  }
+  if (!await safeDirectory(paths.root, path.dirname(filename), report)) return false;
+  if ((await readRegularFile(filename)).contents !== contents) {
+    issue(report.preserved, filename, 'Record changed during cleanup.');
+    return false;
+  }
+  return await removeFile(paths.root, filename, report, dryRun);
+}
+
+async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<Map<ManagedServiceName, ServiceRuntime>> {
   const result = new Map<ManagedServiceName, ServiceRuntime>();
-  const manager = new ProcessManager(paths);
+  const manager = new ProcessManager(paths, { inspectProcess: (pid) => snapshotIdentity(snapshot, pid) });
   const runtimeExists = await safeDirectory(paths.root, paths.runtime, report);
   if (!runtimeExists) {
     for (const name of SERVICE_NAMES) result.set(name, { state: 'inactive' });
     return result;
   }
 
-  for (const name of SERVICE_NAMES) {
+  await Promise.all(SERVICE_NAMES.map(async (name) => {
     const filename = path.join(paths.runtime, `${name}.json`);
     let raw: string;
-    let recordSize: number;
     let value: unknown;
     try {
-      const file = await readRegularFile(filename);
-      raw = file.contents;
-      recordSize = file.size;
+      raw = (await readRegularFile(filename)).contents;
       value = JSON.parse(raw) as unknown;
     } catch (error) {
       if (errorCode(error) === 'ENOENT') {
         result.set(name, { state: 'inactive' });
-        continue;
+        return;
       }
       issue(report.preserved, filename, `Process record is unreadable or damaged: ${error instanceof Error ? error.message : String(error)}`);
       result.set(name, { state: 'unknown' });
-      continue;
+      return;
     }
 
     const spec = recordSpec(name, value, paths);
     try {
       const status = await manager.status(spec);
+      if ((await readRegularFile(filename)).contents !== raw) throw new Error('Process record changed during cleanup.');
       if (status.state === 'stopped') {
-        if (!dryRun) {
-          await manager.stop(spec);
-          if (!await exists(filename)) {
-            report.removed++;
-            report.bytesRemoved += recordSize;
-          }
-        } else {
-          report.wouldRemove++;
+        if (!value || typeof value !== 'object' || !('pid' in value) || typeof value.pid !== 'number') {
+          throw new Error('Process record has no valid PID.');
         }
-        result.set(name, { state: 'inactive', entrypoint: spec.entrypoint });
+        const removed = await removeUnchangedRecord(paths, filename, raw, value.pid, report, dryRun);
+        result.set(name, { state: removed ? 'inactive' : 'unknown', entrypoint: spec.entrypoint });
       } else {
-        if (status.state === 'degraded') issue(report.preserved, filename, status.detail);
+        if (status.state !== 'running') issue(report.preserved, filename, status.detail);
         result.set(name, { state: status.state === 'running' ? 'active' : 'unknown', entrypoint: spec.entrypoint });
       }
     } catch (error) {
       issue(report.preserved, filename, `Process identity could not be verified: ${error instanceof Error ? error.message : String(error)}`);
       result.set(name, { state: 'unknown', entrypoint: spec.entrypoint });
     }
-  }
+  }));
   return result;
 }
 
-async function exists(filename: string): Promise<boolean> {
-  try { await lstat(filename); return true; } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
-}
 
 function sameIdentity(record: Record<string, unknown>, current: ProcessIdentity): boolean {
   const executablePath = typeof record.executablePath === 'string' ? record.executablePath : '';
@@ -228,11 +264,13 @@ function sameIdentity(record: Record<string, unknown>, current: ProcessIdentity)
     && normalize(commandLine) === normalize(current.commandLine);
 }
 
-async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean): Promise<void> {
+async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<void> {
   const filename = path.join(paths.runtime, 'lifecycle.lock');
   let record: Record<string, unknown>;
+  let contents: string;
   try {
     const file = await readRegularFile(filename);
+    contents = file.contents;
     const value = JSON.parse(file.contents) as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Lock record is malformed.');
     record = value as Record<string, unknown>;
@@ -246,18 +284,19 @@ async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun
   }
 
   try {
-    const current = await inspectProcess(record.pid as number);
+    const current = snapshotIdentity(snapshot, record.pid as number);
     if (current && !sameIdentity(record, current)) {
       issue(report.preserved, filename, 'Lock PID was reused or no longer matches its saved identity.');
       return;
     }
-    if (!current) await removeFile(paths.root, filename, report, dryRun);
+    if (!current) await removeUnchangedRecord(paths, filename, contents, record.pid as number, report, dryRun);
+    else issue(report.preserved, filename, 'Lifecycle lock belongs to a live process.');
   } catch (error) {
     issue(report.preserved, filename, `Lock owner identity could not be verified: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-async function cleanReadyFiles(paths: BrcPaths, report: CleanupReport, dryRun: boolean): Promise<void> {
+async function cleanReadyFiles(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<void> {
   const directory = paths.runtime;
   let entries;
   try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) {
@@ -275,7 +314,7 @@ async function cleanReadyFiles(paths: BrcPaths, report: CleanupReport, dryRun: b
       const file = await readRegularFile(filename);
       const value = JSON.parse(file.contents) as Record<string, unknown>;
       if (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0) throw new Error('Ready record has no valid PID.');
-      if (!await inspectProcess(value.pid)) await removeFile(paths.root, filename, report, dryRun);
+      if (!snapshotIdentity(snapshot, value.pid)) await removeUnchangedRecord(paths, filename, file.contents, value.pid, report, dryRun);
       else issue(report.preserved, filename, 'Ready record still references a live process.');
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') issue(report.preserved, filename, `Ready record is damaged or unverified: ${error instanceof Error ? error.message : String(error)}`);
@@ -474,10 +513,11 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
     return report;
   }
 
-  const runtimes = await inspectServiceRecords(paths, report, dryRun);
+  const snapshot = await runtimeSnapshot(paths, report);
+  const runtimes = await inspectServiceRecords(paths, report, dryRun, snapshot);
   if (await safeDirectory(paths.root, paths.runtime, report)) {
-    await cleanLifecycleLock(paths, report, dryRun);
-    await cleanReadyFiles(paths, report, dryRun);
+    await cleanLifecycleLock(paths, report, dryRun, snapshot);
+    await cleanReadyFiles(paths, report, dryRun, snapshot);
   }
   const cutoff = Date.now() - settings.logs.retentionDays * 24 * 60 * 60 * 1000;
   await cleanTemporaryFiles(paths, report, dryRun, cutoff);
