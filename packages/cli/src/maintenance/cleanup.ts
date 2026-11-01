@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, rmdir, unlink } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rmdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { BrcPaths } from '../config/paths.js';
 import { DEFAULT_SETTINGS, type BrcSettings } from '../config/settings.js';
@@ -553,6 +553,30 @@ export async function cleanRuntime(paths: BrcPaths, options: CleanupOptions = {}
 
   const cutoff = Date.now() - settings.logs.retentionDays * 24 * 60 * 60 * 1000;
   await cleanTemporaryFiles(paths, report, dryRun, cutoff);
+  try {
+    await lstat(paths.runtime);
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') {
+      issue(report.failures, paths.runtime, error instanceof Error ? error.message : String(error));
+      return report;
+    }
+    if (path.relative(path.resolve(paths.root), path.resolve(path.dirname(paths.runtime))) !== '') {
+      issue(report.preserved, paths.runtime, 'Runtime directory is not directly inside the BRC data root.');
+      return report;
+    }
+    if (dryRun) {
+      issue(report.preserved, paths.runtime, 'Runtime directory is missing; protected cleanup candidates were not evaluated.');
+      return report;
+    }
+    try {
+      await mkdir(paths.runtime);
+    } catch (mkdirError) {
+      if (errorCode(mkdirError) !== 'EEXIST') {
+        issue(report.failures, paths.runtime, mkdirError instanceof Error ? mkdirError.message : String(mkdirError));
+        return report;
+      }
+    }
+  }
   if (!await safeDirectory(paths.root, paths.runtime, report)) return report;
 
   const lockPath = path.join(paths.runtime, 'lifecycle.lock');

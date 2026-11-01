@@ -90,6 +90,33 @@ async function directoryBytes(directory) {
   return bytes;
 }
 
+test('cleans expired logs when the runtime directory does not exist', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  await rm(brcPaths.runtime, { recursive: true });
+  const filename = path.join(brcPaths.logs, 'expired.log');
+  await writeFile(filename, 'expired');
+  await setAge(filename, 8 * DAY);
+
+  const report = await cleanRuntime(brcPaths);
+
+  assert.equal(await exists(filename), false);
+  assert.equal(report.failures.length, 0);
+});
+
+test('dry-run reports a missing runtime without creating it', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  await rm(brcPaths.runtime, { recursive: true });
+  const filename = path.join(brcPaths.logs, 'expired.log');
+  await writeFile(filename, 'expired');
+  await setAge(filename, 8 * DAY);
+
+  const report = await cleanRuntime(brcPaths, { dryRun: true });
+
+  assert.equal(await exists(brcPaths.runtime), false);
+  assert.equal(await exists(filename), true);
+  assert.ok(report.preserved.some((item) => item.path === brcPaths.runtime && /not evaluated/i.test(item.reason)));
+});
+
 test('removes expired logs and downloads while preserving recent files, SQLite, and credentials', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   const oldLog = path.join(brcPaths.logs, 'expired.log');
