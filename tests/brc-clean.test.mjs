@@ -169,6 +169,43 @@ test('removes a valid process record only after its process exits', async (t) =>
   assert.equal(await exists(path.join(harness.paths.runtime, 'relay.json')), false);
 });
 
+test('preserves an exited service record whose entrypoint is outside its workspace', async (t) => {
+  const harness = await makeManagedRelay(t);
+  await harness.manager.start(harness.spec);
+  const filename = path.join(harness.paths.runtime, 'relay.json');
+  const original = await readFile(filename, 'utf8');
+  const record = JSON.parse(original);
+  process.kill(record.pid);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if ((await harness.manager.status(harness.spec)).state === 'stopped') break;
+    await sleep(100);
+  }
+  record.entrypoint = path.join(path.dirname(harness.root), 'outside-service.js');
+  await writeFile(filename, JSON.stringify(record));
+  const report = await cleanRuntime(harness.paths);
+  assert.equal(JSON.parse(await readFile(filename, 'utf8')).entrypoint, record.entrypoint);
+  assert.ok(report.preserved.some((item) => item.path === filename && /workspace/i.test(item.reason)));
+  await writeFile(filename, original);
+});
+
+test('pairing agent is active without a cleanup warning', async (t) => {
+  const harness = await makeRoot(t, false);
+  const entrypoint = path.join(harness.root, 'pairing-service.mjs');
+  await writeFile(entrypoint, fakeService.replace("state: 'running'", "state: 'pairing'"));
+  const spec = { name: 'agent', entrypoint, workspaceRoot: harness.root, cwd: harness.root, env: {} };
+  const manager = new ProcessManager(harness.paths, { startupTimeoutMs: 3000, shutdownTimeoutMs: 300, pollIntervalMs: 25 });
+  t.after(async () => {
+    await manager.stop(spec);
+    await rm(harness.root, { recursive: true, force: true });
+  });
+  await manager.start(spec);
+  const report = await cleanRuntime(harness.paths);
+  const filename = path.join(harness.paths.runtime, 'agent.json');
+  assert.equal(await exists(filename), true);
+  assert.equal(report.preserved.some((item) => item.path === filename), false);
+});
+
+
 test('preserves live and malformed ready and lock records', async (t) => {
   const { paths: brcPaths } = await makeRoot(t);
   const ready = path.join(brcPaths.runtime, 'relay.live.ready.json');
@@ -206,7 +243,7 @@ function runSimulatedCimCleanup(root, scenario) {
   const source = `
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 
@@ -219,7 +256,7 @@ const ready = path.join(paths.runtime, 'relay.sample.ready.json');
 const lockContents = JSON.stringify({ pid: 12, createdAt: 'old', executablePath: process.execPath, commandLine: 'old' });
 const readyContents = JSON.stringify({ pid: 12 });
 const files = [];
-if (scenario === 'batch' || scenario === 'failure') {
+if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
   for (const name of ['relay', 'traefik', 'agent']) {
     const filename = path.join(paths.runtime, name + '.json');
     writeFileSync(filename, JSON.stringify({
@@ -243,6 +280,10 @@ childProcess.execFileSync = (_file, args) => {
   const query = args.at(-1);
   queries.push(query);
   if (scenario === 'failure') throw new Error('CIM access denied');
+  if (scenario === 'partial') {
+    if (queries.length === 1 || query.includes('ProcessId = 11')) throw new Error('CIM incomplete identity');
+    return '';
+  }
   if (scenario === 'batch') {
     return JSON.stringify([11, 12].map((pid) => ({
       pid, createdAt: 'different', executablePath: process.execPath, commandLine: 'different',
@@ -258,17 +299,24 @@ childProcess.execFileSync = (_file, args) => {
 syncBuiltinESMExports();
 const { cleanRuntime } = await import(${JSON.stringify(cleanupUrl)});
 const report = await cleanRuntime(paths);
-if (scenario === 'batch' || scenario === 'failure') {
-  assert.equal(queries.length, 1);
+if (scenario === 'batch' || scenario === 'failure' || scenario === 'partial') {
+  assert.equal(queries.length, scenario === 'batch' ? 1 : scenario === 'failure' ? 3 : 5);
   const pids = [...queries[0].matchAll(/ProcessId = (\\d+)/g)].map((match) => Number(match[1])).sort();
   assert.deepEqual(pids, [11, 12]);
-  for (const filename of files) {
-    assert.ok(readFileSync(filename, 'utf8'));
-    assert.ok(report.preserved.some((item) => item.path === filename));
-  }
-  if (scenario === 'failure') {
+  if (scenario === 'partial') {
+    for (const filename of files.slice(0, 3)) {
+      assert.ok(readFileSync(filename, 'utf8'));
+      assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM incomplete identity')));
+    }
+    assert.equal(existsSync(lock), false);
+    assert.equal(existsSync(ready), false);
+  } else {
     for (const filename of files) {
-      assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM access denied')));
+      assert.ok(readFileSync(filename, 'utf8'));
+      assert.ok(report.preserved.some((item) => item.path === filename));
+      if (scenario === 'failure') {
+        assert.ok(report.preserved.some((item) => item.path === filename && item.reason.includes('CIM access denied')));
+      }
     }
   }
 } else {
@@ -289,6 +337,11 @@ test('cleanup deduplicates service, lock and ready PIDs in one CIM query', async
 test('cleanup preserves every record when CIM inspection fails', async (t) => {
   const { root } = await makeRoot(t);
   runSimulatedCimCleanup(root, 'failure');
+});
+
+test('cleanup isolates an incomplete PID identity and cleans independently verified records', async (t) => {
+  const { root } = await makeRoot(t);
+  runSimulatedCimCleanup(root, 'partial');
 });
 
 test('cleanup preserves ready record when its PID is reused after the snapshot', async (t) => {

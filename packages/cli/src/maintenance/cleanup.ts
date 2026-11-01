@@ -157,7 +157,9 @@ function recordSpec(name: ManagedServiceName, value: unknown, paths: BrcPaths) {
   return { name, entrypoint, workspaceRoot, cwd: workspaceRoot };
 }
 
-async function runtimeSnapshot(paths: BrcPaths, report: CleanupReport): Promise<Map<number, ProcessIdentity | null> | Error> {
+type IdentitySnapshot = Map<number, ProcessIdentity | null | Error> | Error;
+
+async function runtimeSnapshot(paths: BrcPaths, report: CleanupReport): Promise<IdentitySnapshot> {
   if (!await safeDirectory(paths.root, paths.runtime, report)) return new Map();
   let entries;
   try {
@@ -180,14 +182,24 @@ async function runtimeSnapshot(paths: BrcPaths, report: CleanupReport): Promise<
   try {
     return await inspectProcesses([...pids]);
   } catch (error) {
-    return error instanceof Error ? error : new Error(String(error));
+    if (pids.size <= 1) return error instanceof Error ? error : new Error(String(error));
+    const results = await Promise.all([...pids].map(async (pid): Promise<[number, ProcessIdentity | null | Error]> => {
+      try {
+        return [pid, (await inspectProcesses([pid])).get(pid) ?? null];
+      } catch (individualError) {
+        return [pid, individualError instanceof Error ? individualError : new Error(String(individualError))];
+      }
+    }));
+    return new Map(results);
   }
 }
 
-function snapshotIdentity(snapshot: Map<number, ProcessIdentity | null> | Error, pid: number): ProcessIdentity | null {
+function snapshotIdentity(snapshot: IdentitySnapshot, pid: number): ProcessIdentity | null {
   if (snapshot instanceof Error) throw snapshot;
   if (!snapshot.has(pid)) throw new Error('PID was not included in the identity snapshot.');
-  return snapshot.get(pid) ?? null;
+  const identity = snapshot.get(pid);
+  if (identity instanceof Error) throw identity;
+  return identity ?? null;
 }
 
 async function removeUnchangedRecord(
@@ -205,7 +217,7 @@ async function removeUnchangedRecord(
   return await removeFile(paths.root, filename, report, dryRun);
 }
 
-async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<Map<ManagedServiceName, ServiceRuntime>> {
+async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: IdentitySnapshot): Promise<Map<ManagedServiceName, ServiceRuntime>> {
   const result = new Map<ManagedServiceName, ServiceRuntime>();
   const manager = new ProcessManager(paths, { inspectProcess: (pid) => snapshotIdentity(snapshot, pid) });
   const runtimeExists = await safeDirectory(paths.root, paths.runtime, report);
@@ -236,14 +248,17 @@ async function inspectServiceRecords(paths: BrcPaths, report: CleanupReport, dry
       const status = await manager.status(spec);
       if ((await readRegularFile(filename)).contents !== raw) throw new Error('Process record changed during cleanup.');
       if (status.state === 'stopped') {
+        if (!isWithin(spec.workspaceRoot, spec.entrypoint)) {
+          throw new Error('Service entrypoint must belong to its workspace.');
+        }
         if (!value || typeof value !== 'object' || !('pid' in value) || typeof value.pid !== 'number') {
           throw new Error('Process record has no valid PID.');
         }
         const removed = await removeUnchangedRecord(paths, filename, raw, value.pid, report, dryRun);
         result.set(name, { state: removed ? 'inactive' : 'unknown', entrypoint: spec.entrypoint });
       } else {
-        if (status.state !== 'running') issue(report.preserved, filename, status.detail);
-        result.set(name, { state: status.state === 'running' ? 'active' : 'unknown', entrypoint: spec.entrypoint });
+        if (status.state !== 'running' && status.state !== 'pairing') issue(report.preserved, filename, status.detail);
+        result.set(name, { state: status.state === 'running' || status.state === 'pairing' ? 'active' : 'unknown', entrypoint: spec.entrypoint });
       }
     } catch (error) {
       issue(report.preserved, filename, `Process identity could not be verified: ${error instanceof Error ? error.message : String(error)}`);
@@ -264,7 +279,7 @@ function sameIdentity(record: Record<string, unknown>, current: ProcessIdentity)
     && normalize(commandLine) === normalize(current.commandLine);
 }
 
-async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<void> {
+async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: IdentitySnapshot): Promise<void> {
   const filename = path.join(paths.runtime, 'lifecycle.lock');
   let record: Record<string, unknown>;
   let contents: string;
@@ -296,7 +311,7 @@ async function cleanLifecycleLock(paths: BrcPaths, report: CleanupReport, dryRun
   }
 }
 
-async function cleanReadyFiles(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: Map<number, ProcessIdentity | null> | Error): Promise<void> {
+async function cleanReadyFiles(paths: BrcPaths, report: CleanupReport, dryRun: boolean, snapshot: IdentitySnapshot): Promise<void> {
   const directory = paths.runtime;
   let entries;
   try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) {
