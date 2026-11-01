@@ -466,13 +466,9 @@ export class SqliteStore {
    'DELETE FROM audit WHERE id IN (SELECT id FROM audit INDEXED BY audit_ts WHERE ts < ? ORDER BY ts, id LIMIT ?)',
   ).run(retentionCutoff, AUDIT_CLEANUP_BATCH_SIZE);
 
-  const { count } = this.#db.prepare('SELECT COUNT(*) AS count FROM audit').get() as { count: number };
-  const excess = Math.min(AUDIT_CLEANUP_BATCH_SIZE, count - audit.maxEntries);
-  if (excess > 0) {
-   this.#db.prepare(
-    'DELETE FROM audit WHERE id IN (SELECT id FROM audit ORDER BY id ASC LIMIT ?)',
-   ).run(excess);
-  }
+  this.#db.prepare(
+   'DELETE FROM audit WHERE id < (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?)',
+  ).run(audit.maxEntries - 1);
   }
 
   /* ---------- OAuth clients (management) ---------- */

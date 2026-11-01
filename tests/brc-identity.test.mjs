@@ -506,6 +506,21 @@ test('audit housekeeping enforces zero, one, 50000 and 50001 row boundaries', ()
   }
 });
 
+test('audit housekeeping enforces maxEntries when excess exceeds one cleanup batch', () => {
+  const store = SqliteStore.open(':memory:');
+  try {
+    const now = Date.now();
+    for (let index = 0; index < 1_012; index += 1) addAudit(store, now + index, `entry-${index}`);
+
+    store.vacuumExpired({ retentionDays: 30, maxEntries: 10 });
+
+    assert.equal(store.auditStats('admin-id').total, 10);
+    assert.equal(store.recentAudit('admin-id', 1)[0].tool, 'entry-1011');
+  } finally {
+    store.close();
+  }
+});
+
 test('audit housekeeping deletes expired rows in bounded batches', () => {
   const store = SqliteStore.open(':memory:');
   try {

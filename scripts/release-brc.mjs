@@ -113,28 +113,33 @@ function publishedVersion() {
 }
 
 async function verifyAndTag(artifact) {
-  let metadata = null;
-  for (let attempt = 0; attempt < RELEASE_CONFIG.registryAttempts; attempt++) {
-    metadata = registryVersion(artifact.version);
-    if (metadata) break;
-    if (attempt + 1 < RELEASE_CONFIG.registryAttempts) await new Promise((resolve) => setTimeout(resolve, RELEASE_CONFIG.registryPollMs));
-  }
-  if (!metadata) throw new Error('Registry publication is not visible yet. Keep the release checkpoint and rerun to verify.');
-  assertRegistryIntegrity(artifact, metadata);
+  await runStage('Wait for npm registry', async () => {
+    let metadata = null;
+    for (let attempt = 0; attempt < RELEASE_CONFIG.registryAttempts; attempt++) {
+      progress.detail(`Lookup ${attempt + 1}/${RELEASE_CONFIG.registryAttempts}`);
+      metadata = registryVersion(artifact.version);
+      if (metadata) break;
+      if (attempt + 1 < RELEASE_CONFIG.registryAttempts) await new Promise((resolve) => setTimeout(resolve, RELEASE_CONFIG.registryPollMs));
+    }
+    if (!metadata) throw new Error('Registry publication is not visible yet. Keep the release checkpoint and rerun to verify.');
+    assertRegistryIntegrity(artifact, metadata);
+  });
   progress.print('  Registry content verified: ' + artifact.name + '@' + artifact.version);
 
-  const localResult = quick('git', ['rev-parse', '--verify', artifact.tag + '^{commit}'], { allowFailure: true });
-  const local = localResult.status === 0 ? localResult.stdout.trim() : '';
-  if (local && local !== artifact.revision) throw new Error('Local release tag points to a different source revision.');
-  const remoteResult = quick('git', ['ls-remote', 'origin', 'refs/tags/' + artifact.tag, 'refs/tags/' + artifact.tag + '^{}'], { allowFailure: true });
-  if (remoteResult.status !== 0) throw new Error('Remote tag lookup failed: ' + remoteResult.stderr.slice(-800));
-  const remoteLines = remoteResult.stdout.trim().split(/\r?\n/).filter(Boolean);
-  const remoteCommit = remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag + '^{}'))?.split(/\s+/)[0]
-    ?? remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag))?.split(/\s+/)[0];
-  if (remoteCommit && remoteCommit !== artifact.revision) throw new Error('Remote release tag points to a different source revision.');
-  if (!local) quick('git', ['tag', artifact.tag, artifact.revision]);
-  if (!remoteCommit) await command('git', ['push', 'origin', artifact.tag]);
-  await store.markRegistryVerified(artifact);
+  await runStage('Verify release tag', async () => {
+    const localResult = quick('git', ['rev-parse', '--verify', artifact.tag + '^{commit}'], { allowFailure: true });
+    const local = localResult.status === 0 ? localResult.stdout.trim() : '';
+    if (local && local !== artifact.revision) throw new Error('Local release tag points to a different source revision.');
+    const remoteResult = quick('git', ['ls-remote', 'origin', 'refs/tags/' + artifact.tag, 'refs/tags/' + artifact.tag + '^{}'], { allowFailure: true });
+    if (remoteResult.status !== 0) throw new Error('Remote tag lookup failed: ' + remoteResult.stderr.slice(-800));
+    const remoteLines = remoteResult.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const remoteCommit = remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag + '^{}'))?.split(/\s+/)[0]
+      ?? remoteLines.find((line) => line.endsWith('refs/tags/' + artifact.tag))?.split(/\s+/)[0];
+    if (remoteCommit && remoteCommit !== artifact.revision) throw new Error('Remote release tag points to a different source revision.');
+    if (!local) quick('git', ['tag', artifact.tag, artifact.revision]);
+    if (!remoteCommit) await command('git', ['push', 'origin', artifact.tag]);
+    await store.markRegistryVerified(artifact);
+  });
   progress.print('  Published and tagged: ' + artifact.name + '@' + artifact.version);
 }
 
@@ -212,7 +217,7 @@ async function release() {
   artifact.tag = tag;
   artifact = await store.markAttempted(artifact);
   artifact.tag = tag;
-  await command('npm', ['publish', artifact.archivePath, '--access', 'public', '--registry', RELEASE_CONFIG.registry], { interactive: true });
+  await runStage('Upload npm package', () => command('npm', ['publish', artifact.archivePath, '--access', 'public', '--registry', RELEASE_CONFIG.registry], { interactive: true }));
   await verifyAndTag(artifact);
 }
 

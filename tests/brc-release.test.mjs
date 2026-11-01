@@ -75,6 +75,13 @@ test('progress renderer refreshes a terminal while a stage runs', async () => {
   assert.match(output.data, /✓/);
 });
 
+test('real release shows distinct upload, registry and tag progress stages', () => {
+  const source = readFileSync(script, 'utf8');
+  assert.match(source, /await runStage\('Upload npm package',.*command\('npm', \['publish'/);
+  assert.match(source, /await runStage\('Wait for npm registry'/);
+  assert.match(source, /await runStage\('Verify release tag'/);
+});
+
 test('runner preserves concise subprocess errors', async () => {
   const runner = new ReleaseRunner();
   await assert.rejects(
