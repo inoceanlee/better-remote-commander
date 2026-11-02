@@ -143,8 +143,8 @@ async function verifyAndTag(artifact) {
   progress.print('  Published and tagged: ' + artifact.name + '@' + artifact.version);
 }
 
-async function runStage(title, operation) {
-  progress.start(title);
+async function runStage(title, operation, options = {}) {
+  progress.start(title, options);
   try {
     const result = await operation();
     progress.finish(result);
@@ -217,7 +217,7 @@ async function release() {
   artifact.tag = tag;
   artifact = await store.markAttempted(artifact);
   artifact.tag = tag;
-  await runStage('Upload npm package', () => command('npm', ['publish', artifact.archivePath, '--access', 'public', '--registry', RELEASE_CONFIG.registry], { interactive: true }));
+  await runStage('Upload npm package', () => command('npm', ['publish', artifact.archivePath, '--access', 'public', '--registry', RELEASE_CONFIG.registry], { interactive: true }), { interactive: true });
   await verifyAndTag(artifact);
 }
 

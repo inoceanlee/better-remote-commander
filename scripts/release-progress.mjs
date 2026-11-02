@@ -18,12 +18,14 @@ export class ReleaseProgress {
     this.output.write(message + '\n');
   }
 
-  start(stage) {
+  start(stage, { interactive = false } = {}) {
     this.finish();
     this.current = { stage, started: performance.now(), lastHeartbeat: performance.now(), detail: '' };
     this.output.write('  ' + stage + '\n');
-    this.timer = setInterval(() => this.render(), RELEASE_CONFIG.progressIntervalMs);
-    this.timer.unref?.();
+    if (!interactive) {
+      this.timer = setInterval(() => this.render(), RELEASE_CONFIG.progressIntervalMs);
+      this.timer.unref?.();
+    }
   }
 
   detail(message) {
