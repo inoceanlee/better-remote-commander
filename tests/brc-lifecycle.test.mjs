@@ -722,3 +722,94 @@ test('refuses forced termination when the PID identity changes after shutdown', 
     await harness.manager.stop(harness.spec);
   }
 });
+
+test('start automatically evicts stale process record when PID identity does not match', async (t) => {
+  const fakeForeignPid = 999999;
+  const harness = await makeHarness(t, {
+    processOptions: {
+      inspectProcess: async (pid) => {
+        if (pid === fakeForeignPid) {
+          return {
+            pid: fakeForeignPid,
+            createdAt: '1234567890',
+            executablePath: 'C:\\Windows\\System32\\svchost.exe',
+            commandLine: 'svchost.exe -k netsvcs',
+          };
+        }
+        return inspectProcess(pid);
+      },
+    },
+  });
+
+  // Seed a stale record with a valid format whose PID belongs to an unrelated system process
+  const staleRecord = {
+    version: 1,
+    id: '11111111-2222-3333-4444-555555555555',
+    service: harness.spec.name,
+    pid: fakeForeignPid,
+    createdAt: '9999999999', // Mismatched creation time
+    executablePath: 'C:\\Windows\\System32\\svchost.exe',
+    commandLine: 'svchost.exe -k netsvcs',
+    workspaceRoot: harness.spec.workspaceRoot,
+    entrypoint: harness.spec.entrypoint,
+    controlPort: 12345,
+    controlToken: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  };
+  await writeFile(path.join(harness.paths.runtime, `${harness.spec.name}.json`), JSON.stringify(staleRecord, null, 2));
+
+  // Querying status should still safely report degraded (read-only query does not mutate)
+  const status = await harness.manager.status(harness.spec);
+  assert.equal(status.state, 'degraded');
+  assert.match(status.detail, /identity/i);
+
+  // ServiceManager start should evict the stale degraded service and launch the real process cleanly
+  const serviceManager = new ServiceManager(harness.paths, [harness.spec], harness.manager, new LifecycleLock(harness.paths));
+  await serviceManager.start();
+
+  const statusAfter = await serviceManager.status();
+  assert.equal(statusAfter[0].state, 'running');
+  assert.notEqual(statusAfter[0].pid, fakeForeignPid);
+});
+
+test('start automatically evicts corrupted process record JSON and recovers', async (t) => {
+  const harness = await makeHarness(t);
+  // Write corrupted JSON to simulate partial write during unexpected power loss
+  await writeFile(path.join(harness.paths.runtime, `${harness.spec.name}.json`), '{ "broken_json": true, ');
+
+  // Status reports degraded on corrupt file
+  const status = await harness.manager.status(harness.spec);
+  assert.equal(status.state, 'degraded');
+
+  // Start recovers cleanly
+  const serviceManager = new ServiceManager(harness.paths, [harness.spec], harness.manager, new LifecycleLock(harness.paths));
+  await serviceManager.start();
+  const statusAfter = await serviceManager.status();
+  assert.equal(statusAfter[0].state, 'running');
+});
+
+test('start automatically evicts record belonging to another workspace and recovers', async (t) => {
+  const harness = await makeHarness(t);
+  const foreignRecord = {
+    version: 1,
+    id: '22222222-3333-4444-5555-666666666666',
+    service: harness.spec.name,
+    pid: process.pid,
+    createdAt: '1234567890',
+    executablePath: process.execPath,
+    commandLine: 'node test',
+    workspaceRoot: path.resolve('C:\\some\\other\\foreign\\workspace'),
+    entrypoint: path.resolve('C:\\some\\other\\foreign\\workspace\\entry.js'),
+    controlPort: 12345,
+    controlToken: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  };
+  await writeFile(path.join(harness.paths.runtime, `${harness.spec.name}.json`), JSON.stringify(foreignRecord, null, 2));
+
+  const status = await harness.manager.status(harness.spec);
+  assert.equal(status.state, 'degraded');
+  assert.match(status.detail, /workspace/i);
+
+  const serviceManager = new ServiceManager(harness.paths, [harness.spec], harness.manager, new LifecycleLock(harness.paths));
+  await serviceManager.start();
+  const statusAfter = await serviceManager.status();
+  assert.equal(statusAfter[0].state, 'running');
+});

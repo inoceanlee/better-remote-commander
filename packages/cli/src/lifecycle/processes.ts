@@ -209,12 +209,22 @@ export class ProcessManager {
 
     try {
       await mkdir(this.paths.runtime, { recursive: true });
-      const current = await this.readRecord(spec);
+      let current: ManagedProcessRecord | null = null;
+      try {
+        current = await this.readRecord(spec);
+      } catch {
+        // Corrupted or invalid process record from a previous crash: safely evict
+        await this.removeRecord(spec.name);
+      }
       if (current) {
         const identity = await this.inspect(current.pid);
-        if (!identity) await this.removeRecord(spec.name);
-        else if (!sameIdentity(current, identity, spec)) throw new Error(`${spec.name} process identity does not match its saved record; refusing to start or stop it.`);
-        else {
+        if (!identity) {
+          await this.removeRecord(spec.name);
+        } else if (!sameIdentity(current, identity, spec)) {
+          // Stale record: PID was reused by another process or creation time does not match.
+          // Safely evict the stale record without killing the unrelated foreign process.
+          await this.removeRecord(spec.name);
+        } else {
           const health = await this.readHealth(current);
           if ((health.state === 'running' && health.ok) || (spec.name === 'agent' && health.state === 'pairing')) return;
           throw new Error(`${spec.name} is already managed but unhealthy: ${health.detail}`);

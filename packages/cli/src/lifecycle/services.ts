@@ -157,7 +157,14 @@ export class ServiceManager {
       for (const service of this.services) {
         const current = await this.processes.status(service);
         if (current.state === 'running' || (service.name === 'agent' && current.state === 'pairing')) continue;
-        if (current.state !== 'stopped') {
+        const isStaleLock = current.state === 'degraded' && (
+          current.detail.includes('Process identity changed') ||
+          current.detail.includes('malformed') ||
+          current.detail.includes('incomplete') ||
+          current.detail.includes('belongs to another workspace') ||
+          current.detail.includes('JSON')
+        );
+        if (current.state !== 'stopped' && !isStaleLock) {
           throw new Error(`Cannot start ${service.name}: ${current.detail}`);
         }
         await this.processes.start(service);
