@@ -3,6 +3,7 @@ import unzipper from 'unzipper';
 import type { BrcSettings } from '../config/settings.js';
 import type { ZipEntry } from 'unzipper';
 import { PlatformEnvironment, type PlatformTarget } from '../config/platform-environment.js';
+import type { ArchiveBinaryEntry } from './extractor.js';
 
 export type { PlatformTarget };
 
@@ -144,7 +145,7 @@ export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
 export function verifyChecksum(actual: string, expected: string): void {
   if (actual !== expected) throw new Error('Official Traefik ZIP SHA-256 checksum does not match.');
 }
-export async function processArchive(archive: Buffer, expectedChecksum: string): Promise<ZipEntry> {
+export async function processArchive(archive: Buffer, expectedChecksum: string): Promise<ArchiveBinaryEntry> {
   const actualChecksum = createHash('sha256').update(archive).digest('hex');
   verifyChecksum(actualChecksum, expectedChecksum);
   const open = unzipper.Open;
@@ -152,5 +153,13 @@ export async function processArchive(archive: Buffer, expectedChecksum: string):
     throw new Error('ZIP library does not support in-memory archive processing.');
   }
   const directory = await open.buffer(archive);
-  return validateArchiveEntries(directory.files);
+  const entry = validateArchiveEntries(directory.files);
+  return {
+    name: entry.path,
+    size: entry.uncompressedSize,
+    openStream: () => entry.stream(),
+    path: entry.path,
+    uncompressedSize: entry.uncompressedSize,
+    stream: () => entry.stream(),
+  };
 }
