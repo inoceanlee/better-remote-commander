@@ -1,5 +1,7 @@
 # Better Remote Commander (BRC)
 
+English | [简体中文](README_zh.md)
+
 Use your existing AI chat access to work on your own computer. BRC connects chat clients that support remote MCP (Model Context Protocol) to a self-hosted relay. You can manage files, run terminal commands, and inspect processes from a conversation.
 
 Free chat allowances, such as ChatGPT's free tier, and chat allowances separate from coding-agent quotas, such as those in the Gemini ecosystem, are useful resources. BRC can put compatible chat access to work when the client supports remote MCP tools. Connector access depends on the platform and plan.
