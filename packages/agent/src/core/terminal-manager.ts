@@ -6,8 +6,10 @@ import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
 import { randomBytes } from 'node:crypto';
-import { createShellEncodingDecoder, encodeShellInput, SHELL_PROBE_OUTPUT_LIMIT_BYTES, SHELL_PROBE_TIMEOUT_MS, ShellEncodingProbe, type ShellEncodingInfo } from './terminal-encoding.js';
-
+import os from 'node:os';
+import fs from 'node:fs';
+import { ShellEncodingCoordinator, type ShellEncodingSession } from './shell-coordinator.js';
+import { encodeShellInput } from './terminal-encoding.js';
 
 /**
  * Standard Windows PATHEXT value, used to repair a corrupted PATHEXT before
@@ -147,21 +149,25 @@ function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig
   };
 }
 
-function getWindowsProbeShell(shellPath: string): 'powershell' | 'cmd' | null {
- if (process.platform !== 'win32') return null;
- const shellName = path.basename(shellPath).toLowerCase();
- if (shellName === 'pwsh' || shellName === 'pwsh.exe' || shellName === 'powershell' || shellName === 'powershell.exe') return 'powershell';
- if (shellName === 'cmd' || shellName === 'cmd.exe') return 'cmd';
- return null;
+export function resolveDynamicShellPath(configuredShell?: string | boolean): string | undefined {
+  if (typeof configuredShell === 'string' && configuredShell.trim()) {
+    return configuredShell.trim();
+  }
+  if (process.platform === 'win32') {
+    return process.env.ComSpec ?? 'cmd.exe';
+  }
+  if (process.env.SHELL && fs.existsSync(process.env.SHELL)) {
+    return process.env.SHELL;
+  }
+  try {
+    const userShell = os.userInfo().shell;
+    if (userShell && fs.existsSync(userShell)) return userShell;
+  } catch {}
+  for (const fallback of ['/bin/zsh', '/bin/bash', '/bin/sh', '/usr/bin/zsh', '/usr/bin/bash', '/usr/bin/sh']) {
+    if (fs.existsSync(fallback)) return fallback;
+  }
+  return undefined;
 }
-
-function getShellProbeCommand(shell: 'powershell' | 'cmd', marker: string, command: string): string {
- if (shell === 'powershell') {
-  return `$in=[Console]::InputEncoding.WebName;$out=[Console]::OutputEncoding.WebName;$pipe=$OutputEncoding.WebName;$cp=[Console]::OutputEncoding.CodePage;$report='${marker}|in='+$in+';out='+$out+';pipe='+$pipe+';cp='+$cp+[char]10;$bytes=[Text.Encoding]::ASCII.GetBytes($report);$stream=[Console]::OpenStandardOutput();$stream.Write($bytes,0,$bytes.Length);$stream.Flush();if([Console]::In.ReadLine() -ne 'Y'){exit 125};${command}`;
- }
- return `for /f "tokens=2 delims=:" %A in ('chcp') do @echo ${marker}^|cp=%A & set /p "_BRC_READY=" && ${command}`;
-}
-
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
@@ -215,14 +221,10 @@ export class TerminalManager {
       console.log(`Enhanced SSH command: ${enhancedCommand}`);
     }
 
-  const effectiveShellPath = typeof shellToUse === 'string'
-   ? shellToUse
-   : process.platform === 'win32' && shellToUse ? (process.env.ComSpec ?? 'cmd.exe') : undefined;
-  const probeShell = effectiveShellPath ? getWindowsProbeShell(effectiveShellPath) : null;
-  const probeMarker = probeShell ? `BRC_PROBE_${randomBytes(16).toString('hex')}` : '';
-  const shellProbe = probeShell ? new ShellEncodingProbe(probeMarker, SHELL_PROBE_OUTPUT_LIMIT_BYTES, probeShell) : null;
-  const shellCommand = probeShell ? getShellProbeCommand(probeShell, probeMarker, enhancedCommand) : enhancedCommand;
-    // Get the appropriate spawn configuration for the shell
+  const effectiveShellPath = resolveDynamicShellPath(shellToUse);
+  const coordinator = new ShellEncodingCoordinator(process.platform, effectiveShellPath);
+  const encodingSession: ShellEncodingSession = coordinator.createSession(enhancedCommand);
+  const shellCommand = encodingSession.wrappedCommand;
     let spawnConfig: ShellSpawnConfig;
     let spawnOptions: any;
     
@@ -339,11 +341,7 @@ export class TerminalManager {
       let periodicCheck: NodeJS.Timeout | null = null;
    let commandTimeout: NodeJS.Timeout | null = null;
    let probeTimeout: NodeJS.Timeout | null = null;
-   let probeReady = !shellProbe;
-   let stderrPending = Buffer.alloc(0);
-   let stdoutDecoder = createShellEncodingDecoder('utf-8');
-   let stderrDecoder = createShellEncodingDecoder('utf-8');
-
+   let probeReady = !encodingSession.probeRequired;
       // Quick prompt patterns for immediate detection
       const quickPromptPatterns = />>>\s*$|>\s*$|\$\s*$|#\s*$/;
 
@@ -382,16 +380,16 @@ export class TerminalManager {
    const failProbe = (reason: string) => {
     if (probeReady || resolved) return;
     probeReady = true;
+    encodingSession.dispose();
     childProcess.kill();
     exitReason = 'process_exit';
     resolveOnce({ pid: childProcess.pid!, output: 'Shell encoding probe failed: ' + reason, isBlocked: false });
    };
-   if (shellProbe) {
-    probeTimeout = setTimeout(() => failProbe('timed out'), SHELL_PROBE_TIMEOUT_MS);
+   if (encodingSession.probeRequired) {
+    probeTimeout = setTimeout(() => failProbe('timed out'), 5000);
    } else {
     startCommandTimeout();
    }
-
       // Now that resolveOnce exists, route process errors into it: an error after
       // a successful spawn means the process is gone, so the caller must not sit
       // waiting for output that will never arrive.
@@ -412,32 +410,30 @@ export class TerminalManager {
 
    childProcess.stdout.on('data', (data: Buffer) => {
     let text: string;
-    if (shellProbe && !probeReady) {
+    if (encodingSession.probeRequired && !probeReady) {
      try {
-      const detected = shellProbe.push(Buffer.from(data));
-      if (detected.state === 'pending') return;
-      const info = detected.info!;
-      stdoutDecoder = createShellEncodingDecoder(info.consoleOutput);
-      stderrDecoder = createShellEncodingDecoder(info.consoleOutput);
-      const prefix = Buffer.concat([detected.stdout ?? Buffer.alloc(0), detected.trailing ?? Buffer.alloc(0)]);
-      text = stdoutDecoder.write(prefix);
-      if (stderrPending.length) {
-       const earlyStderr = stderrDecoder.write(stderrPending);
-       if (!resolved) output += earlyStderr;
-       this.appendToLineBuffer(session, earlyStderr);
-       stderrPending = Buffer.alloc(0);
-      }
-      childProcess.stdin?.write(encodeShellInput('Y\n', info.consoleInput));
-      session.inputEncoding = info.consoleInput;
+      const feed = encodingSession.feedStdout(Buffer.from(data));
+      if (!feed.ready) return;
       probeReady = true;
       if (probeTimeout) clearTimeout(probeTimeout);
+      if (feed.handshake && childProcess.stdin && !childProcess.stdin.destroyed) {
+       childProcess.stdin.write(feed.handshake);
+      }
+      if (encodingSession.encodingInfo) {
+       session.inputEncoding = encodingSession.encodingInfo.consoleInput;
+      }
+      if (feed.earlyStderr) {
+       if (!resolved) output += feed.earlyStderr;
+       this.appendToLineBuffer(session, feed.earlyStderr);
+      }
+      text = feed.text;
       startCommandTimeout();
      } catch (error) {
       failProbe(error instanceof Error ? error.message : String(error));
       return;
      }
     } else {
-     text = stdoutDecoder.write(Buffer.from(data));
+     text = encodingSession.feedStdout(Buffer.from(data)).text;
     }
         const now = Date.now();
 
@@ -484,16 +480,18 @@ export class TerminalManager {
       });
 
    childProcess.stderr.on('data', (data: Buffer) => {
-    if (shellProbe && !probeReady) {
-     stderrPending = Buffer.concat([stderrPending, Buffer.from(data)]);
-     if (stderrPending.length > SHELL_PROBE_OUTPUT_LIMIT_BYTES) failProbe('stderr exceeded limit');
+    if (encodingSession.probeRequired && !probeReady) {
+     try {
+      encodingSession.feedStderr(Buffer.from(data));
+     } catch (error) {
+      failProbe(error instanceof Error ? error.message : String(error));
+     }
      return;
     }
-    const text = stderrDecoder.write(Buffer.from(data));
-        const now = Date.now();
-
-        if (!firstOutputTime) firstOutputTime = now;
-        lastOutputTime = now;
+    const text = encodingSession.feedStderr(Buffer.from(data));
+    const now = Date.now();
+    if (!firstOutputTime) firstOutputTime = now;
+    lastOutputTime = now;
 
         if (!resolved) {
           output += text;

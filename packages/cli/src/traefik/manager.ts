@@ -209,7 +209,8 @@ export class TraefikManager {
   }
 
   private async validateCandidate(stage: string, release: TraefikRelease): Promise<void> {
-    const executable = path.join(stage, 'traefik.exe');
+    const executableName = process.platform === 'win32' ? 'traefik.exe' : 'traefik';
+    const executable = path.join(stage, executableName);
     await this.verify(executable, release.version);
     await this.healthCheck(executable, release.version);
   }
