@@ -2,7 +2,7 @@
 
 English | [简体中文](README_zh.md)
 
-BRC helps you make full use of chat allowances across AI providers—such as ChatGPT's free tier, or Gemini's separate chat and coding quotas—to safely control your local Windows PC from a chat window. This brings agent capabilities close to a local harness directly into everyday conversations, including file management, terminal command execution, and system status monitoring.
+BRC helps you make full use of chat allowances across AI providers—such as ChatGPT's currently free tier, or Gemini's separate chat and coding quotas—to safely control your local Windows PC from a chat window. This brings agent capabilities close to a local harness directly into everyday conversations, including file management, terminal command execution, and system status monitoring.
 
 Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander), rewritten and optimized for the native Windows x64 environment.
 
@@ -67,21 +67,21 @@ On first start, the terminal or `brc logs agent` outputs a device pairing code a
 
 ## Common Commands
 
-| Command | Purpose |
-| --- | --- |
-| `brc help` | Show help and all commands |
-| `brc start` | Start Relay, Traefik, and Agent in sequence |
-| `brc stop` | Stop all managed services |
-| `brc restart` | Restart all managed services |
-| `brc status` | Check service health and running status |
-| `brc logs [relay\|agent\|traefik]` | View service logs |
-| `brc config show` | View effective configuration |
-| `brc config get <key>` | Read a specific configuration setting |
-| `brc config set <key> <value>` | Update a setting and save atomically |
-| `brc config apply` | Apply manually edited YAML configuration |
-| `brc config path` | Display configuration file path |
-| `brc update traefik` | Check and update Traefik binary |
-| `brc clean` | Clean temporary runtime data and invalid locks |
+| Command                            | Purpose                                        |
+| ---------------------------------- | ---------------------------------------------- |
+| `brc help`                         | Show help and all commands                     |
+| `brc start`                        | Start Relay, Traefik, and Agent in sequence    |
+| `brc stop`                         | Stop all managed services                      |
+| `brc restart`                      | Restart all managed services                   |
+| `brc status`                       | Check service health and running status        |
+| `brc logs [relay\|agent\|traefik]` | View service logs                              |
+| `brc config show`                  | View effective configuration                   |
+| `brc config get <key>`             | Read a specific configuration setting          |
+| `brc config set <key> <value>`     | Update a setting and save atomically           |
+| `brc config apply`                 | Apply manually edited YAML configuration       |
+| `brc config path`                  | Display configuration file path                |
+| `brc update traefik`               | Check and update Traefik binary                |
+| `brc clean`                        | Clean temporary runtime data and invalid locks |
 
 Update BRC to the latest version:
 
@@ -112,7 +112,7 @@ Choose the uninstallation method based on whether you want to preserve your data
   ```powershell
   brc uninstall
   ```
-  *Note: `brc uninstall` automatically schedules package removal upon exit. If the global command persists, run the package manager uninstall command manually.*
+  _Note: `brc uninstall` automatically schedules package removal upon exit. If the global command persists, run the package manager uninstall command manually._
 
 ## License and Security
 
