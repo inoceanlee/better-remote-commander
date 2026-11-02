@@ -15,8 +15,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const dryRun = process.argv.includes('--dry-run');
 const verbose = process.argv.includes('--verbose');
 const help = process.argv.includes('--help');
-if (process.argv.slice(2).some((arg) => !['--dry-run', '--verbose', '--help'].includes(arg))) {
-  throw new Error('Usage: pnpm release:brc [--dry-run] [--verbose]');
+if (process.argv.slice(2).some((arg) => !['--dry-run', '--verbose', '--help', '--verify-only'].includes(arg))) {
+  throw new Error('Usage: pnpm release:brc [--dry-run] [--verbose] [--verify-only]');
 }
 if (help) {
   console.log('pnpm release:brc [--dry-run] [--verbose]');
@@ -24,7 +24,7 @@ if (help) {
   console.log('Use --dry-run to validate without uploading or tagging.');
   process.exit(0);
 }
-if (!dryRun && !process.stdin.isTTY) {
+if (!dryRun && !process.stdin.isTTY && !process.argv.includes('--verify-only')) {
   console.error('npm publish requires a local interactive terminal for authentication. Run pnpm release:brc locally.');
   process.exit(2);
 }
