@@ -2,9 +2,9 @@
 
 English | [简体中文](README_zh.md)
 
-BRC helps you make full use of chat allowances across AI providers—such as ChatGPT's currently free tier, or Gemini's separate chat and coding quotas—to safely control your local Windows PC from a chat window. This brings agent capabilities close to a local harness directly into everyday conversations, including file management, terminal command execution, and system status monitoring.
+BRC helps you make full use of chat allowances across AI providers—such as ChatGPT's currently free tier, or Gemini's separate chat and coding quotas—to safely control your computer from a chat window. This brings agent capabilities close to a local harness directly into everyday conversations, including file management, terminal command execution, and system status monitoring.
 
-Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander), rewritten and optimized for the native Windows x64 environment.
+Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander), rewritten and optimized with runtime auto-adaptation for Windows, Linux, and macOS.
 
 ## Key Design
 
@@ -15,7 +15,7 @@ Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better
 
 ## Requirements
 
-- Operating system: Windows 11 x64.
+- Operating system: Windows 10/11 x64, Linux (x64/arm64), or macOS (x64/Apple Silicon).
 - Runtime environment: Node.js.
 - Package manager: `pnpm` or `npm`.
 - Public access: An HTTPS endpoint for remote client connections.
@@ -93,7 +93,11 @@ npm update -g @inoceanlee/brc
 
 ## Configuration and Data Storage
 
-BRC stores configuration and private data in `%LOCALAPPDATA%\BRC\`:
+BRC stores configuration and private data in standard platform locations:
+- Windows: `%LOCALAPPDATA%\BRC\`
+- Linux: `$XDG_DATA_HOME/brc` or `~/.local/share/brc`
+- macOS: `~/Library/Application Support/brc`
+
 Set the `BRC_DATA_ROOT` environment variable to use a custom directory.
 Run `brc config path` to locate the configuration file.
 

@@ -1,31 +1,31 @@
 {
-    "name": "brc",
-    "private": true,
-    "description": "Better Remote Commander (BRC) - self-hosted remote desktop agent + MCP relay for Claude and ChatGPT",
-    "license": "MIT",
-    "packageManager": "pnpm@11.24.0",
-    "engines": {
-        "node": "\u003e=20"
-    },
-    "scripts": {
-        "build": "pnpm -r --filter \"./packages/*\" build && node scripts/build-native.mjs",
-        "clean": "pnpm -r --filter \"./packages/*\" exec rimraf dist",
-        "typecheck": "pnpm -r --filter \"./packages/*\" exec tsc --noEmit",
-        "agent": "pnpm --filter brc-agent start",
-        "relay": "pnpm --filter brc-relay start",
-        "dev:relay": "pnpm --filter brc-relay build \u0026\u0026 node packages/relay/dist/cli.js",
-        "dev:agent": "pnpm --filter brc-agent build \u0026\u0026 node packages/agent/dist/cli.js",
-        "extract-tools": "node scripts/extract-tools.mjs",
-         "release:brc": "node scripts/release-brc.mjs",
-         "test:unit": "node --test packages/relay/test/unit.test.mjs tests/brc-cli.test.mjs tests/brc-config.test.mjs tests/brc-lifecycle.test.mjs tests/brc-clean.test.mjs tests/brc-traefik.test.mjs tests/brc-logs.test.mjs tests/brc-uninstall.test.mjs tests/brc-identity.test.mjs tests/brc-native-process.test.mjs tests/brc-release.test.mjs tests/brc-release-workspace.test.mjs tests/brc-package-prune.test.mjs tests/brc-maintenance-fixes.test.mjs tests/brc-agent-config.test.mjs tests/brc-agent-pairing.test.mjs tests/brc-agent-terminal-encoding.test.mjs tests/brc-agent-text.test.mjs tests/brc-agent-history.test.mjs tests/brc-benchmark.test.mjs tests/brc-native.test.mjs tests/brc-lock.test.mjs",
-        "test:cli": "node --test tests/brc-cli.test.mjs",
-        "test:e2e": "node scripts/e2e-all.mjs",
-        "test:package": "node scripts/test-brc-package.mjs",
-        "test": "pnpm test:unit \u0026\u0026 pnpm test:package \u0026\u0026 pnpm test:e2e"
-    },
-    "devDependencies": {
-        "@types/node": "^24.0.0",
-        "rimraf": "^6.0.1",
-        "typescript": "^5.6.0"
-    }
+ "name": "brc",
+ "private": true,
+ "description": "Better Remote Commander (BRC) - self-hosted remote desktop agent + MCP relay for Claude and ChatGPT",
+ "license": "MIT",
+ "packageManager": "pnpm@11.24.0",
+ "engines": {
+  "node": "\u003e=20"
+ },
+ "scripts": {
+  "build": "pnpm -r --filter \"./packages/*\" build && node scripts/build-native.mjs",
+  "clean": "pnpm -r --filter \"./packages/*\" exec rimraf dist",
+  "typecheck": "pnpm -r --filter \"./packages/*\" exec tsc --noEmit",
+  "agent": "pnpm --filter brc-agent start",
+  "relay": "pnpm --filter brc-relay start",
+  "dev:relay": "pnpm --filter brc-relay build \u0026\u0026 node packages/relay/dist/cli.js",
+  "dev:agent": "pnpm --filter brc-agent build \u0026\u0026 node packages/agent/dist/cli.js",
+  "extract-tools": "node scripts/extract-tools.mjs",
+  "release:brc": "node scripts/release-brc.mjs",
+  "test:unit": "node --test packages/relay/test/unit.test.mjs tests/brc-cli.test.mjs tests/brc-config.test.mjs tests/brc-lifecycle.test.mjs tests/brc-clean.test.mjs tests/brc-traefik.test.mjs tests/brc-logs.test.mjs tests/brc-uninstall.test.mjs tests/brc-identity.test.mjs tests/brc-native-process.test.mjs tests/brc-release.test.mjs tests/brc-release-workspace.test.mjs tests/brc-package-prune.test.mjs tests/brc-maintenance-fixes.test.mjs tests/brc-agent-config.test.mjs tests/brc-agent-pairing.test.mjs tests/brc-agent-terminal-encoding.test.mjs tests/brc-agent-text.test.mjs tests/brc-agent-history.test.mjs tests/brc-benchmark.test.mjs tests/brc-native.test.mjs tests/brc-lock.test.mjs tests/brc-platform.test.mjs tests/brc-agent-shell-coordinator.test.mjs tests/brc-cross-platform.test.mjs",
+  "test:cli": "node --test tests/brc-cli.test.mjs",
+  "test:e2e": "node scripts/e2e-all.mjs",
+  "test:package": "node scripts/test-brc-package.mjs",
+  "test": "pnpm test:unit \u0026\u0026 pnpm test:package \u0026\u0026 pnpm test:e2e"
+ },
+ "devDependencies": {
+  "@types/node": "^24.0.0",
+  "rimraf": "^6.0.1",
+  "typescript": "^5.6.0"
+ }
 }

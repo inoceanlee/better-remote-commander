@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-本项目能够帮助你充分利用各家 AI 的聊天端资源，如当前 Chat 暂时免费的 GPT，以及 Chat 额度与 Coding 额度分开的 Gemini，实现 Chat 端对于本地 Windows 电脑的安全操控，让你在日常对话中获取到和本地 Harness 近乎相同的 Agent 能力，包括管理文件、运行终端命令并查看系统状态。
+本项目能够帮助你充分利用各家 AI 的聊天端资源，如当前 Chat 暂时免费的 GPT，以及 Chat 额度与 Coding 额度分开的 Gemini，实现 Chat 端对于本地电脑的安全操控，让你在日常对话中获取到和本地 Harness 近乎相同的 Agent 能力，包括管理文件、运行终端命令并查看系统状态。
 
-本项目基于 [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander) 重写，专为 Windows x64 原生环境优化。
+本项目基于 [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander) 重写，专为 Windows、Linux 和 macOS 全平台运行时自适应优化。
 
 ## 核心设计
 
@@ -15,7 +15,7 @@
 
 ## 环境要求
 
-- 操作系统：Windows 11 x64。
+- 操作系统：Windows 10/11 x64、Linux（x64/arm64）或 macOS（x64/Apple Silicon）。
 - 运行环境：需要 Node.js。
 - 包管理器：`pnpm` 或 `npm`。
 - 公网接入：客户端远程访问所需的 HTTPS 入口。
@@ -93,7 +93,11 @@ npm update -g @inoceanlee/brc
 
 ## 配置与数据存储
 
-BRC 的配置文件与私有数据默认存放于 `%LOCALAPPDATA%\BRC\`：
+BRC 的配置文件与私有数据默认存放于各平台标准路径：
+- Windows: `%LOCALAPPDATA%\BRC\`
+- Linux: `$XDG_DATA_HOME/brc` 或 `~/.local/share/brc`
+- macOS: `~/Library/Application Support/brc`
+
 如需自定义存储位置，可设置环境变量 `BRC_DATA_ROOT`。
 执行 `brc config path` 可快速定位配置文件。
 

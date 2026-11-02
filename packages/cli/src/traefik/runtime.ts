@@ -222,6 +222,7 @@ export async function runManagedTraefikService(settings: Readonly<BrcSettings> =
     const executable = path.join(traefikRoot, 'versions', manifest.current, executableName);
     const configFile = path.join(configDirectory, 'traefik.yml');
     await ensureRegularFile(executable);
+    await ensureRegularFile(configFile);
     await ensureRegularFile(path.join(configDirectory, 'dynamic.yml'));
     await verifyExecutable(executable, manifest.current, settings);
     const healthPort = environmentPort('BRC_TRAEFIK_HEALTH_PORT');
