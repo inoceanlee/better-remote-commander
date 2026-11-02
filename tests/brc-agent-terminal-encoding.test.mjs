@@ -8,7 +8,16 @@ const modulePath = process.env.BRC_TERMINAL_ENCODING_MODULE;
 const moduleUrl = modulePath
   ? (modulePath.startsWith('file:') ? modulePath : pathToFileURL(path.resolve(modulePath)).href)
   : new URL('../packages/agent/dist/core/terminal-encoding.js', import.meta.url).href;
-const { ShellEncodingProbe, createShellEncodingDecoder, encodeShellInput, parseShellEncodingInfo } = await import(moduleUrl);
+const {
+  ShellEncodingProbe,
+  createShellEncodingDecoder,
+  encodeShellInput,
+  parseShellEncodingInfo,
+  parsePosixLocaleReport,
+  getPosixShellProbeCommand,
+  buildPosixShellProbeCommand,
+  normalizeEncoding,
+} = await import(moduleUrl);
 const terminalManagerUrl = new URL('../packages/agent/dist/core/terminal-manager.js', import.meta.url).href;
 
 test('Windows shell probe streams Chinese stdin/stdout/stderr and preserves command exit codes', { skip: process.platform !== 'win32' }, async () => {
@@ -109,3 +118,64 @@ test('shell decoder flushes final bytes passed to end', () => {
   assert.equal(decoder.write(Buffer.from([0xD6, 0xD0, 0xCE])), '中');
   assert.equal(decoder.end(Buffer.from([0xC4])), '文');
 });
+
+test('parsePosixLocaleReport normalizes UTF-8, GBK, GB2312, ISO-8859-1, EUC-JP, and Shift-JIS', () => {
+  assert.deepEqual(parsePosixLocaleReport('charmap=UTF-8;lang=en_US.UTF-8'), {
+    consoleInput: 'utf-8', consoleOutput: 'utf-8', nativePipe: 'utf-8', codePage: 65001,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=GBK;lang=zh_CN.GBK'), {
+    consoleInput: 'gbk', consoleOutput: 'gbk', nativePipe: 'gbk', codePage: 936,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=GB2312;lang=zh_CN.GB2312'), {
+    consoleInput: 'gbk', consoleOutput: 'gbk', nativePipe: 'gbk', codePage: 936,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=ISO-8859-1;lang=en_US.ISO-8859-1'), {
+    consoleInput: 'iso-8859-1', consoleOutput: 'iso-8859-1', nativePipe: 'iso-8859-1', codePage: 28591,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=EUC-JP;lang=ja_JP.ujis'), {
+    consoleInput: 'euc-jp', consoleOutput: 'euc-jp', nativePipe: 'euc-jp', codePage: 20932,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=Shift_JIS;lang=ja_JP.SJIS'), {
+    consoleInput: 'shift_jis', consoleOutput: 'shift_jis', nativePipe: 'shift_jis', codePage: 932,
+  });
+});
+
+test('parsePosixLocaleReport prefers lang codeset when charmap is ascii fallback', () => {
+  assert.deepEqual(parsePosixLocaleReport('charmap=ANSI_X3.4-1968;lang=en_US.UTF-8'), {
+    consoleInput: 'utf-8', consoleOutput: 'utf-8', nativePipe: 'utf-8', codePage: 65001,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=;lang=zh_CN.gbk'), {
+    consoleInput: 'gbk', consoleOutput: 'gbk', nativePipe: 'gbk', codePage: 936,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=ANSI_X3.4-1968;lang=C'), {
+    consoleInput: 'ascii', consoleOutput: 'ascii', nativePipe: 'ascii', codePage: 20127,
+  });
+  assert.deepEqual(parsePosixLocaleReport('charmap=;lang='), {
+    consoleInput: 'utf-8', consoleOutput: 'utf-8', nativePipe: 'utf-8', codePage: 65001,
+  });
+});
+
+test('parsePosixLocaleReport throws on invalid probe report or unsupported encoding', () => {
+  assert.throws(() => parsePosixLocaleReport('foo=bar'), /invalid POSIX locale probe report/);
+  assert.throws(() => parsePosixLocaleReport('charmap=invalid_encoding_xyz;lang='), /unsupported shell encoding/);
+});
+
+test('POSIX shell probe command builder injects locale charmap, LC_ALL/LANG and read handshake', () => {
+  const cmd = getPosixShellProbeCommand('BRC_PROBE_123', 'echo hello');
+  assert.match(cmd, /locale charmap/);
+  assert.match(cmd, /LC_ALL/);
+  assert.match(cmd, /BRC_PROBE_123\|charmap=%s;lang=%s/);
+  assert.match(cmd, /read -r _BRC_READY/);
+  assert.match(cmd, /echo hello/);
+  assert.equal(buildPosixShellProbeCommand('BRC_PROBE_123', 'echo hello'), cmd);
+});
+
+test('ShellEncodingProbe handles POSIX shell probe outputs', () => {
+  const probe = new ShellEncodingProbe('BRC_PROBE_POSIX', 64 * 1024, 'posix');
+  const result = probe.push(Buffer.from('pre BRC_PROBE_POSIX|charmap=UTF-8;lang=en_US.UTF-8\npost'));
+  assert.equal(result.state, 'complete');
+  assert.deepEqual(result.info, { consoleInput: 'utf-8', consoleOutput: 'utf-8', nativePipe: 'utf-8', codePage: 65001 });
+  assert.equal(result.stdout.toString('ascii'), 'pre ');
+  assert.equal(result.trailing.toString('ascii'), 'post');
+});
+
