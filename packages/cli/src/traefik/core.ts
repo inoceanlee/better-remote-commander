@@ -3,7 +3,7 @@ import unzipper from 'unzipper';
 import type { BrcSettings } from '../config/settings.js';
 import type { ZipEntry } from 'unzipper';
 import { PlatformEnvironment, type PlatformTarget } from '../config/platform-environment.js';
-import type { ArchiveBinaryEntry } from './extractor.js';
+import { ArchiveExtractorFactory, type ArchiveBinaryEntry } from './extractor.js';
 
 export type { PlatformTarget };
 
@@ -145,21 +145,24 @@ export function validateArchiveEntries(entries: ZipEntry[]): ZipEntry {
 export function verifyChecksum(actual: string, expected: string): void {
   if (actual !== expected) throw new Error('Official Traefik ZIP SHA-256 checksum does not match.');
 }
-export async function processArchive(archive: Buffer, expectedChecksum: string): Promise<ArchiveBinaryEntry> {
+export async function processArchive(
+  archive: Buffer,
+  expectedChecksum: string,
+  archiveNameOrFormat: string = 'windows_amd64.zip',
+  expectedExecutableName: string = process.platform === 'win32' ? 'traefik.exe' : 'traefik',
+): Promise<ArchiveBinaryEntry> {
   const actualChecksum = createHash('sha256').update(archive).digest('hex');
   verifyChecksum(actualChecksum, expectedChecksum);
-  const open = unzipper.Open;
-  if (!('buffer' in open) || typeof open.buffer !== 'function') {
-    throw new Error('ZIP library does not support in-memory archive processing.');
-  }
-  const directory = await open.buffer(archive);
-  const entry = validateArchiveEntries(directory.files);
+
+  const format: 'zip' | 'tar.gz' = archiveNameOrFormat.endsWith('.tar.gz') ? 'tar.gz' : 'zip';
+  const extractor = ArchiveExtractorFactory.create(format);
+  const entry = await extractor.extractExecutable(archive, expectedExecutableName);
   return {
-    name: entry.path,
-    size: entry.uncompressedSize,
-    openStream: () => entry.stream(),
-    path: entry.path,
-    uncompressedSize: entry.uncompressedSize,
-    stream: () => entry.stream(),
+    name: entry.name,
+    size: entry.size,
+    openStream: () => entry.openStream(),
+    path: entry.name,
+    uncompressedSize: entry.size,
+    stream: () => entry.openStream(),
   };
 }

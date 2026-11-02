@@ -229,7 +229,8 @@ export class TraefikManager {
       this.emit({ operation, stage: 'download', status: 'failed' });
       throw error;
     }
-    const executable = await this.progress(operation, 'verify', () => processArchive(archive, checksum));
+    const executableName = process.platform === 'win32' ? 'traefik.exe' : 'traefik';
+    const executable = await this.progress(operation, 'verify', () => processArchive(archive, checksum, release.archiveName, executableName));
     return this.progress(operation, 'stage', () => this.output.stageArchive(release, executable));
   }
 
