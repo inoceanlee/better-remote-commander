@@ -218,10 +218,10 @@ export async function runManagedTraefikService(settings: Readonly<BrcSettings> =
     if (!manifest) throw new Error('Traefik is not installed. Run brc setup first.');
     await ensureSafeDirectory(traefikRoot, path.join(traefikRoot, 'versions', manifest.current));
     await ensureSafeDirectory(traefikRoot, configDirectory);
-    const executable = path.join(traefikRoot, 'versions', manifest.current, 'traefik.exe');
+    const executableName = process.platform === 'win32' ? 'traefik.exe' : 'traefik';
+    const executable = path.join(traefikRoot, 'versions', manifest.current, executableName);
     const configFile = path.join(configDirectory, 'traefik.yml');
     await ensureRegularFile(executable);
-    await ensureRegularFile(configFile);
     await ensureRegularFile(path.join(configDirectory, 'dynamic.yml'));
     await verifyExecutable(executable, manifest.current, settings);
     const healthPort = environmentPort('BRC_TRAEFIK_HEALTH_PORT');
