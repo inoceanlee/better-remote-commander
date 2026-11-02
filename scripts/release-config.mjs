@@ -11,7 +11,7 @@ export const RELEASE_CONFIG = Object.freeze({
   validationNames: Object.freeze(['unit', 'package', 'e2e', 'dryRun']),
   progressIntervalMs: 120,
   progressHeartbeatMs: 15000,
-  registryAttempts: 60,
+  registryAttempts: 120,
   registryPollMs: 5000,
   keepValidatedArtifacts: 3,
   stagePruneRules: Object.freeze({
