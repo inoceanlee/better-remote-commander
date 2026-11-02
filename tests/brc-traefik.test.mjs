@@ -98,6 +98,36 @@ function makeZip(entries) {
   end.writeUInt32LE(centralOffset, 16);
   return Buffer.concat([...localParts, ...centralParts, end]);
 }
+function makeTarGz(entries) {
+  const { gzipSync } = require('node:zlib');
+  const blocks = [];
+  for (const entry of entries) {
+    const header = Buffer.alloc(512);
+    header.write(entry.name, 0, 100, 'utf8');
+    header.write('0000755\0', 100, 8, 'ascii');
+    header.write('0001000\0', 108, 8, 'ascii');
+    header.write('0001000\0', 116, 8, 'ascii');
+    const data = Buffer.from(entry.contents || '');
+    header.write(data.length.toString(8).padStart(11, '0') + ' ', 124, 12, 'ascii');
+    header.write('14000000000 ', 136, 12, 'ascii');
+    header.write(entry.typeflag || '0', 156, 1, 'ascii');
+    header.write('ustar\0', 257, 6, 'ascii');
+    header.write('00', 263, 2, 'ascii');
+    header.fill(0x20, 148, 156);
+    let chksum = 0;
+    for (let i = 0; i < 512; i++) chksum += header[i];
+    header.write(chksum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+    blocks.push(header);
+    if (data.length > 0) {
+      blocks.push(data);
+      const remainder = data.length % 512;
+      if (remainder !== 0) blocks.push(Buffer.alloc(512 - remainder));
+    }
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+
 
 function makeRelease(version, options = {}) {
   const filename = `traefik_v${version}_windows_amd64.zip`;
@@ -1058,4 +1088,79 @@ test('asynchronous progress output failure preserves checksum failure and stagin
   const { readdir } = await import('node:fs/promises');
   assert.deepEqual(await readdir(path.join(brcPaths.traefik, 'versions')), []);
   assert.deepEqual(await readdir(brcPaths.tmp), []);
+});
+
+test('ArchiveExtractorFactory creates ZipArchiveExtractor and TarGzArchiveExtractor', async () => {
+  const { ArchiveExtractorFactory, ZipArchiveExtractor, TarGzArchiveExtractor } = await import('../packages/cli/dist/traefik/extractor.js');
+  const zipExtractor = ArchiveExtractorFactory.create('zip');
+  assert.ok(zipExtractor instanceof ZipArchiveExtractor);
+  const tarExtractor = ArchiveExtractorFactory.create('tar.gz');
+  assert.ok(tarExtractor instanceof TarGzArchiveExtractor);
+  assert.throws(() => ArchiveExtractorFactory.create('rar'), /Unsupported archive format/);
+});
+
+test('ZipArchiveExtractor extracts executable with stream and validates safety', async () => {
+  const { ZipArchiveExtractor } = await import('../packages/cli/dist/traefik/extractor.js');
+  const extractor = new ZipArchiveExtractor();
+  const validZip = makeZip([
+    { name: 'traefik.exe', contents: 'binary-zip-content' },
+    { name: 'README.md', contents: 'readme' },
+  ]);
+  const entry = await extractor.extractExecutable(validZip, 'traefik.exe');
+  assert.equal(entry.name, 'traefik.exe');
+  assert.equal(entry.size, 18);
+  const chunks = [];
+  for await (const chunk of entry.openStream()) chunks.push(chunk);
+  assert.equal(Buffer.concat(chunks).toString('utf8'), 'binary-zip-content');
+
+  const unsafeZip = makeZip([{ name: '../traefik.exe', contents: 'bad' }]);
+  await assert.rejects(() => extractor.extractExecutable(unsafeZip, 'traefik.exe'), /unsafe path/);
+
+  const missingZip = makeZip([{ name: 'other.exe', contents: 'other' }]);
+  await assert.rejects(() => extractor.extractExecutable(missingZip, 'traefik.exe'), /does not contain a valid root-level/);
+});
+
+test('TarGzArchiveExtractor extracts executable with stream and validates safety', async () => {
+  const { TarGzArchiveExtractor } = await import('../packages/cli/dist/traefik/extractor.js');
+  const extractor = new TarGzArchiveExtractor();
+  const validTarGz = makeTarGz([
+    { name: 'traefik', contents: 'binary-targz-content' },
+    { name: 'LICENSE', contents: 'mit' },
+  ]);
+  const entry = await extractor.extractExecutable(validTarGz, 'traefik');
+  assert.equal(entry.name, 'traefik');
+  assert.equal(entry.size, 20);
+  const chunks = [];
+  for await (const chunk of entry.openStream()) chunks.push(chunk);
+  assert.equal(Buffer.concat(chunks).toString('utf8'), 'binary-targz-content');
+
+  const unsafeTarGz = makeTarGz([{ name: '/etc/traefik', contents: 'bad' }]);
+  await assert.rejects(() => extractor.extractExecutable(unsafeTarGz, 'traefik'), /unsafe path/);
+
+  const duplicateTarGz = makeTarGz([
+    { name: 'traefik', contents: 'first' },
+    { name: 'traefik', contents: 'second' },
+  ]);
+  await assert.rejects(() => extractor.extractExecutable(duplicateTarGz, 'traefik'), /duplicate path/);
+
+  const missingTarGz = makeTarGz([{ name: 'other', contents: 'other' }]);
+  await assert.rejects(() => extractor.extractExecutable(missingTarGz, 'traefik'), /does not contain a valid root-level/);
+});
+
+test('TraefikOutput stages ArchiveBinaryEntry with openStream and sets file permissions', async (t) => {
+  const { paths: brcPaths } = await makeRoot(t);
+  const { TraefikOutput } = await import('../packages/cli/dist/traefik/output.js');
+  const { Readable } = await import('node:stream');
+  const output = new TraefikOutput(brcPaths);
+  const binaryContent = Buffer.from('traefik-staged-binary');
+  const entry = {
+    name: process.platform === 'win32' ? 'traefik.exe' : 'traefik',
+    size: binaryContent.length,
+    openStream: () => Readable.from([binaryContent]),
+  };
+  const stage = await output.stageArchive({ version: '3.7.17' }, entry);
+  const stagedPath = path.join(stage, entry.name);
+  assert.equal(await readFile(stagedPath, 'utf8'), 'traefik-staged-binary');
+  const fileStat = await stat(stagedPath);
+  assert.equal(fileStat.size, binaryContent.length);
 });

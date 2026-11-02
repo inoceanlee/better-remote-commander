@@ -12,6 +12,7 @@ declare module 'unzipper' {
 
   const unzipper: {
     Open: {
+      buffer(buffer: Buffer): Promise<Directory>;
       file(filename: string): Promise<Directory>;
     };
   };

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { lstat, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import type { ZipEntry } from 'unzipper';
+import type { ArchiveBinaryEntry } from './extractor.js';
 import type { BrcPaths } from '../config/paths.js';
 import { errorCode, type TraefikRelease, type TraefikTemplates, type VersionManifest } from './core.js';
 
@@ -19,18 +19,22 @@ export class TraefikOutput {
     await writeAtomic(path.join(configDirectory, 'traefik.yml'), config.staticConfig);
   }
 
-  async stageArchive(release: Pick<TraefikRelease, 'version'>, executable: ZipEntry): Promise<string> {
+  async stageArchive(release: Pick<TraefikRelease, 'version'>, executable: ArchiveBinaryEntry): Promise<string> {
     const versionsDirectory = path.join(this.paths.traefik, 'versions');
     const stage = path.join(versionsDirectory, `.staging-${release.version}-${randomUUID()}`);
-    const target = path.join(stage, 'traefik.exe');
+    const binaryName = executable.name || (process.platform === 'win32' ? 'traefik.exe' : 'traefik');
+    const target = path.join(stage, binaryName);
     await ensureSafeDirectory(this.paths.root, versionsDirectory);
     await mkdir(stage);
     try {
       await ensureSafeDirectory(this.paths.root, stage);
-      await pipeline(executable.stream(), createWriteStream(target, { flags: 'wx' }));
+      await pipeline(resolveEntryStream(executable), createWriteStream(target, { flags: 'wx' }));
       await ensureRegularFile(target);
-      if ((await stat(target)).size !== executable.uncompressedSize) {
-        throw new Error('Extracted Traefik executable size does not match its ZIP entry.');
+      if ((await stat(target)).size !== resolveEntrySize(executable)) {
+        throw new Error('Extracted Traefik executable size does not match its archive entry.');
+      }
+      if (process.platform !== 'win32') {
+        await chmod(target, 0o755);
       }
       return stage;
     } catch (error) {
@@ -38,7 +42,6 @@ export class TraefikOutput {
       throw error;
     }
   }
-
   async writeManifest(manifest: VersionManifest): Promise<void> {
     await ensureSafeDirectory(this.paths.root, this.paths.traefik);
     await writeAtomic(path.join(this.paths.traefik, 'versions.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -51,9 +54,12 @@ export class TraefikOutput {
     try {
       await lstat(targetDirectory);
       await ensureSafeDirectory(this.paths.root, targetDirectory);
-      const existingExecutable = path.join(targetDirectory, 'traefik.exe');
+      const binaryName = (await lstat(path.join(stage, 'traefik.exe')).catch(() => null))
+        ? 'traefik.exe'
+        : (process.platform === 'win32' ? 'traefik.exe' : 'traefik');
+      const existingExecutable = path.join(targetDirectory, binaryName);
       await ensureRegularFile(existingExecutable);
-      const stagedExecutable = path.join(stage, 'traefik.exe');
+      const stagedExecutable = path.join(stage, binaryName);
       if (await sha256File(existingExecutable) !== await sha256File(stagedExecutable)) {
         throw new Error(`Traefik version directory already contains different files: ${version}`);
       }
@@ -75,9 +81,15 @@ export class TraefikOutput {
   async executableFor(version: string): Promise<string> {
     const versionDirectory = path.join(this.paths.traefik, 'versions', version);
     await ensureSafeDirectory(this.paths.root, versionDirectory);
-    const executable = path.join(versionDirectory, 'traefik.exe');
-    await ensureRegularFile(executable);
-    return executable;
+    let executable = path.join(versionDirectory, process.platform === 'win32' ? 'traefik.exe' : 'traefik');
+    try {
+      await ensureRegularFile(executable);
+      return executable;
+    } catch {
+      const fallback = path.join(versionDirectory, process.platform === 'win32' ? 'traefik' : 'traefik.exe');
+      await ensureRegularFile(fallback);
+      return fallback;
+    }
   }
 
 }
@@ -128,3 +140,39 @@ export async function writeAtomic(filename: string, contents: string): Promise<v
     await rm(temporary, { force: true });
   }
 }
+interface LegacyStreamEntry {
+  stream(): NodeJS.ReadableStream;
+}
+
+function isLegacyStreamEntry(entry: unknown): entry is LegacyStreamEntry {
+  return typeof entry === 'object' && entry !== null && 'stream' in entry && typeof (entry as Record<string, unknown>).stream === 'function';
+}
+
+interface LegacySizeEntry {
+  uncompressedSize: number;
+}
+
+function isLegacySizeEntry(entry: unknown): entry is LegacySizeEntry {
+  return typeof entry === 'object' && entry !== null && 'uncompressedSize' in entry && typeof (entry as Record<string, unknown>).uncompressedSize === 'number';
+}
+
+function resolveEntryStream(entry: ArchiveBinaryEntry): NodeJS.ReadableStream {
+  if (typeof entry.openStream === 'function') {
+    return entry.openStream();
+  }
+  if (isLegacyStreamEntry(entry)) {
+    return entry.stream();
+  }
+  throw new Error('Archive entry does not provide a readable stream.');
+}
+
+function resolveEntrySize(entry: ArchiveBinaryEntry): number {
+  if (typeof entry.size === 'number') {
+    return entry.size;
+  }
+  if (isLegacySizeEntry(entry)) {
+    return entry.uncompressedSize;
+  }
+  throw new Error('Archive entry size is missing.');
+}
+
