@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import unzipper from 'unzipper';
 import type { BrcSettings } from '../config/settings.js';
 import type { ZipEntry } from 'unzipper';
+import { PlatformEnvironment, type PlatformTarget } from '../config/platform-environment.js';
+
+export type { PlatformTarget };
 
 export interface VersionManifest {
   version: 1;
@@ -98,7 +101,7 @@ export function readChecksum(contents: string, filename: string): string {
   throw new Error(`Official Traefik checksum file does not contain ${filename}.`);
 }
 
-export function parseRelease(value: unknown): TraefikRelease {
+export function parseRelease(value: unknown, target?: PlatformTarget): TraefikRelease {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Official Traefik release metadata is malformed.');
   const release = value as Record<string, unknown>;
   if (release.draft !== false || release.prerelease !== false || typeof release.tag_name !== 'string') {
@@ -107,7 +110,8 @@ export function parseRelease(value: unknown): TraefikRelease {
   const match = release.tag_name.match(/^v(\d+\.\d+\.\d+)$/);
   if (!match) throw new Error(`Official Traefik release tag is invalid: ${release.tag_name}`);
   const version = match[1];
-  const archiveName = `traefik_v${version}_windows_amd64.zip`;
+  const resolvedTarget = target ?? new PlatformEnvironment().resolveTraefikTarget();
+  const archiveName = `traefik_v${version}_${resolvedTarget.platform}_${resolvedTarget.arch}.${resolvedTarget.archiveExt}`;
   const checksumName = `traefik_v${version}_checksums.txt`;
   if (!Array.isArray(release.assets)) throw new Error('Official Traefik release has no asset list.');
   const assets = release.assets as unknown[];
