@@ -60,9 +60,12 @@ async function allocateServicePorts() {
 
 function run(command, args, options = {}) {
   const isWindowsShim = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
-  const cmdLine = [`"${command.replaceAll('"', '""')}"`, ...args.map((arg) => `"${arg.replaceAll('"', '""')}"`)].join(' ');
+  const normalizedArgs = command === 'tar' && process.platform === 'win32'
+    ? args.map((arg) => arg.replaceAll('\\', '/'))
+    : args;
+  const cmdLine = [`"${command.replaceAll('"', '""')}"`, ...normalizedArgs.map((arg) => `"${arg.replaceAll('"', '""')}"`)].join(' ');
   const executable = isWindowsShim ? process.env.ComSpec || 'cmd.exe' : command;
-  const spawnArgs = isWindowsShim ? ['/d', '/s', '/c', `"${cmdLine}"`] : args;
+  const spawnArgs = isWindowsShim ? ['/d', '/s', '/c', `"${cmdLine}"`] : normalizedArgs;
   const result = spawnSync(executable, spawnArgs, {
     cwd: repoRoot,
     encoding: 'utf8',
