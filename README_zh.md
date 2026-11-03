@@ -6,64 +6,87 @@
 
 本项目基于 [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander) 重写，专为 Windows、Linux 和 macOS 全平台运行时自适应优化。
 
+## 工作原理
+
+```text
+AI 聊天端（远程 MCP 客户端）
+  |
+公网 HTTPS 入口（用户管理）
+  |
+Traefik（限速与并发保护）
+  |
+Relay（OAuth、设备配对与工具授权）
+  |
+Agent（在本地执行文件与终端操作）
+```
+
+Agent 主动通过出站 WebSocket 连接 Relay，无须向公网开放 Agent 监听端口。
+
 ## 核心设计
 
-- **单包极简管理**：单个 `@inoceanlee/brc` 包内置 Relay、Agent、Traefik 反向代理与 Rust 原生工具，一键全局安装。
-- **轻量干净**：统一按需手动启停，不注册系统服务。需要自动启停可结合 AI 设置。
-- **Traefik 辅助网安**：内置 Traefik 反向代理，统筹单路限流、熔断与高并发保护。为本地服务构建轻量网安防护。
-- **单一配置源**：统一由 `config/brc.yaml` 集中管理各种配置参数。
+- **单包管理**：`@inoceanlee/brc` 包含 CLI、Relay、Agent、Traefik 配置模板和原生工具。执行 `brc setup` 时下载并校验 Traefik 程序。
+- **统一手动启停**：通过 `brc start`、`brc stop` 和 `brc status` 管理服务，不注册自动启动的系统服务。
+- **分层安全控制**：Traefik 负责请求限速和并发限制；Relay 负责 OAuth、设备配对与工具授权。Agent 使用本地运行账号的权限执行已授权操作。
+- **集中配置**：通过 `config/brc.yaml` 或 `brc config` 管理参数。
 
 ## 环境要求
 
-- 操作系统：Windows 10/11 x64、Linux（x64/arm64）或 macOS（x64/Apple Silicon）。
-- 运行环境：需要 Node.js。
-- 包管理器：`pnpm` 或 `npm`。
-- 公网接入：客户端远程访问所需的 HTTPS 入口。
+- 操作系统：Windows 10/11 x64、Linux x64/arm64、macOS x64/Apple Silicon。
+- 运行环境：Node.js 22.13 或更高版本，包管理器使用 pnpm 或 npm。
+- 初始化时需能访问 GitHub，以下载并校验 Traefik。
+- 远程连接需要单独配置公网 HTTPS 入口。
 
-> **关于公网入口**：公网接入层由用户自行管理，请将你的公网 HTTPS 流量转发到本地 Traefik 代理（默认监听 `127.0.0.1:13001`）。常见方案包括 Tailscale Funnel、Cloudflare Tunnel 等。如不熟悉公网配置，可直接咨询 AI 获取对应工具的安装。
+**公网入口由用户管理。** 公网入口终止 HTTPS 加密连接，再将 HTTP 和 WebSocket 流量转发给 Traefik（默认 `http://127.0.0.1:13001`）。可使用 Tailscale Funnel、Cloudflare Tunnel 等方案。BRC 不负责启动或管理这些公网隧道。
 
 ## 安装与快速上手
 
-请在 PowerShell 中按顺序执行以下命令：
+Windows 使用 PowerShell，Linux/macOS 使用 Bash 或 zsh。以下 BRC 命令在这些终端中通用。
 
-**1. 全局安装 BRC**
+**1. 全局安装**（任选一种包管理器）：
 
-使用 pnpm：
+pnpm：
 
-```powershell
+```sh
 pnpm add -g @inoceanlee/brc
 ```
 
-或使用 npm：
+npm：
 
-```powershell
+```sh
 npm install -g @inoceanlee/brc
 ```
 
-**2. 初始化系统**
+**2. 初始化 BRC：**
 
-```powershell
+```sh
 brc setup
 ```
 
-按提示输入管理员账号（默认 `admin`）及密码（至少 8 位）。安装向导会自动创建本地配置并准备 Traefik。
+按提示设置管理员账号（默认 `admin`）及至少 8 位的密码。初始化会创建本地配置，并下载 Traefik。
 
-**3. 设置公网源地址**
+**3. 配置公网入口：**
 
-```powershell
+先自行配置 HTTPS 转发，再设置对应的公网地址：
+
+```sh
 brc config set services.publicUrl https://your-domain.example
 ```
 
-> **注意**：填写完整的源地址（Origin），不要带 `/mcp` 路径。
+只填写 HTTPS 源地址，不要附加 `/mcp`。
 
-**4. 启动并核验状态**
+**4. 启动服务并配对设备：**
 
-```powershell
+```sh
 brc start
 brc status
+brc logs agent
 ```
 
-首次启动时，终端或 `brc logs agent` 会显示设备配对码与验证页面。在浏览器完成配对后，即可在支持远程 MCP 的 AI Chat 端中添加服务器地址：`https://your-domain.example/mcp`。
+首次启动后，在 Agent 日志中获取设备验证页面和配对码。打开页面并批准配对，再用 `brc status` 确认 Agent 在线。
+
+**5. 连接 AI 聊天端：**
+
+在支持远程 MCP 的 AI 聊天端中添加服务器 `https://your-domain.example/mcp`，并按照提示完成 OAuth 授权。公网入口必须同时支持 HTTPS 和 WebSocket。
 
 ## 常用命令
 
@@ -82,10 +105,11 @@ brc status
 | `brc config path`                  | 显示配置文件存放路径             |
 | `brc update traefik`               | 检查并更新 Traefik 组件          |
 | `brc clean`                        | 清理临时运行时数据与无效锁       |
+| `brc uninstall`                    | 停止服务、删除数据并卸载 BRC      |
 
 更新 BRC 版本：
 
-```powershell
+```sh
 pnpm up -g @inoceanlee/brc --latest
 # 或
 npm update -g @inoceanlee/brc
@@ -93,30 +117,45 @@ npm update -g @inoceanlee/brc
 
 ## 配置与数据存储
 
-BRC 的配置文件与私有数据默认存放于各平台标准路径：
-- Windows: `%LOCALAPPDATA%\BRC\`
-- Linux: `$XDG_DATA_HOME/brc` 或 `~/.local/share/brc`
-- macOS: `~/Library/Application Support/brc`
+BRC 默认将配置及私有数据保存在以下位置：
+- Windows：`%LOCALAPPDATA%\BRC\`
+- Linux：`$XDG_DATA_HOME/brc` 或 `~/.local/share/brc`
+- macOS：`~/Library/Application Support/brc`
 
-如需自定义存储位置，可设置环境变量 `BRC_DATA_ROOT`。
-执行 `brc config path` 可快速定位配置文件。
+使用环境变量 `BRC_DATA_ROOT` 可以修改数据根目录。执行 `brc config path` 可查看配置文件位置。
+
+## 常见问题
+
+- **Agent 等待配对**：运行 `brc logs agent` 获取当前验证页面和配对码；在浏览器批准后运行 `brc status`。
+- **AI 聊天端无法连接**：先用 `brc status` 检查服务，再确认公网 HTTPS 已转发至 `http://127.0.0.1:13001` 且支持 WebSocket。MCP 地址应为 `https://your-domain.example/mcp`。
+- **`/mcp` 返回 HTTP 401**：未授权请求收到 401 属正常现象。应在聊天端完成 OAuth 授权，不应关闭 Relay 身份验证。
+- **服务启动失败**：分别查看 `brc logs relay`、`brc logs traefik`、`brc logs agent`；安全边界见 [SECURITY.md](SECURITY.md)。
 
 ## 卸载
 
-请根据是否保留配置与历史数据选择对应的卸载方式：
+**保留配置和私有数据：**先停止服务，再使用安装时的包管理器移除程序。
 
-- **保留配置与私有数据，仅卸载 CLI 工具**：
-  直接移除全局包，所有数据库、配对信息和配置均完好保存：
-  ```powershell
-  pnpm remove -g @inoceanlee/brc
-  # 或 npm rm -g @inoceanlee/brc
-  ```
-- **彻底卸载，同时删除私有数据与配置**：
-  运行卸载命令，按提示确认后，将自动停止所有服务，并彻底删除包括数据库、设备配对凭据、配置文件和日志在内的全部私有数据：
-  ```powershell
-  brc uninstall
-  ```
-  _注：`brc uninstall` 在退出后会自动触发全局包移除；若全局命令仍有残留，手动补跑一次包管理器的卸载命令即可。_
+使用 pnpm：
+
+```sh
+brc stop
+pnpm remove -g @inoceanlee/brc
+```
+
+使用 npm：
+
+```sh
+brc stop
+npm uninstall -g @inoceanlee/brc
+```
+
+**彻底卸载：**该操作停止服务，并永久删除 Relay 数据库、设备凭据、配置及日志等私有数据，然后由安装时的包管理器移除全局包。
+
+```sh
+brc uninstall
+```
+
+Windows 会在 BRC 命令退出后再执行包卸载。若卸载失败，可查看 BRC 输出的报告路径；如命令仍存在，请按安装方式执行 `pnpm remove -g @inoceanlee/brc` 或 `npm uninstall -g @inoceanlee/brc`。如果无法识别安装来源，BRC 会在删除数据前停止。
 
 ## 许可协议与安全
 
