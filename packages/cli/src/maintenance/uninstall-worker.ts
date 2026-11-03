@@ -1,9 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-
-const PACKAGE_NAME = '@inoceanlee/brc';
+import { fileURLToPath } from 'node:url';
+import { GlobalPackageRemoval, isGlobalPackageManager, BRC_PACKAGE_NAME as PACKAGE_NAME } from './global-package.js';
 const SHIM_SETTLE_DELAY_MS = 750;
 const PARENT_EXIT_TIMEOUT_MS = 30_000;
 
@@ -41,33 +40,6 @@ async function waitForParentExit(pid: number): Promise<void> {
   throw new Error(`Parent process ${pid} did not exit before timeout.`);
 }
 
-function runPnpmRemove(): { exitCode: number | null; output: string } {
-  const lookup = spawnSync('where.exe', ['pnpm'], { encoding: 'utf8', windowsHide: true });
-  if (lookup.error) throw lookup.error;
-  if (lookup.status !== 0) throw new Error(`where.exe pnpm failed: ${lookup.stderr.trim()}`);
-  const commands = lookup.stdout.split(/\r?\n/).filter(Boolean);
-  const command = commands.find((candidate) => /\.exe$/i.test(candidate))
-    ?? commands.find((candidate) => /\.(?:cmd|bat)$/i.test(candidate));
-  if (!command) throw new Error('where.exe pnpm found no executable command.');
-
-  const args = ['remove', '--global', PACKAGE_NAME];
-  const isShim = /\.(?:cmd|bat)$/i.test(command);
-  const cmdLine = [`"${command.replaceAll('"', '""')}"`, ...args.map((arg) => `"${arg.replaceAll('"', '""')}"`)].join(' ');
-  const result = spawnSync(
-    isShim ? process.env.ComSpec || 'cmd.exe' : command,
-    isShim ? ['/d', '/s', '/c', `"${cmdLine}"`] : args,
-    {
-      cwd: os.tmpdir(),
-      encoding: 'utf8',
-      windowsHide: true,
-      windowsVerbatimArguments: isShim,
-      maxBuffer: 4 * 1024 * 1024,
-    },
-  );
-  if (result.error) throw result.error;
-  return { exitCode: result.status, output: `${result.stdout || ''}${result.stderr || ''}`.slice(-8192) };
-}
-
 async function updateReport(reportPath: string, update: Partial<RemovalReport>): Promise<void> {
   const report = JSON.parse(await readFile(reportPath, 'utf8')) as RemovalReport;
   await writeFile(reportPath, JSON.stringify({ ...report, ...update }, null, 2));
@@ -77,7 +49,8 @@ async function main(): Promise<void> {
   const parentPid = Number(process.argv[2]);
   const reportPath = path.resolve(process.argv[3] ?? '');
   const packageName = process.argv[4];
-  if (!Number.isSafeInteger(parentPid) || parentPid <= 0 || packageName !== PACKAGE_NAME
+  const manager = process.argv[5];
+  if (!Number.isSafeInteger(parentPid) || parentPid <= 0 || packageName !== PACKAGE_NAME || !isGlobalPackageManager(manager)
       || path.dirname(reportPath) !== path.resolve(os.tmpdir())
       || !path.basename(reportPath).startsWith('brc-uninstall-')) {
     throw new Error('Invalid uninstall worker arguments.');
@@ -86,8 +59,7 @@ async function main(): Promise<void> {
   try {
     await waitForParentExit(parentPid);
     await sleep(SHIM_SETTLE_DELAY_MS);
-    const result = runPnpmRemove();
-    if (result.exitCode !== 0) throw Object.assign(new Error(result.output || `pnpm exited with ${result.exitCode}.`), { exitCode: result.exitCode });
+    const result = new GlobalPackageRemoval(fileURLToPath(import.meta.url)).remove(manager);
     await updateReport(reportPath, { status: 'completed', completedAt: new Date().toISOString(), exitCode: 0, output: result.output });
   } catch (error) {
     await updateReport(reportPath, {

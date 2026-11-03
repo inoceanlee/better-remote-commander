@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -7,9 +7,11 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import type { BrcPaths } from '../config/paths.js';
 import { removeBrcData, type CleanupReport } from './cleanup.js';
+import { GlobalPackageRemoval, type GlobalPackageManager, BRC_PACKAGE_NAME as PACKAGE_NAME } from './global-package.js';
 
-const PACKAGE_NAME = '@inoceanlee/brc';
-const PNPM_PATHS = [
+// Global shims preserve the launch path; pnpm can resolve imported modules into its content store.
+const globalPackageRemoval = new GlobalPackageRemoval(process.argv[1] ?? fileURLToPath(import.meta.url));
+const PACKAGE_MANAGER_ENV_PATHS = [
   'PNPM_HOME',
   'PNPM_CONFIG_GLOBAL_DIR',
   'PNPM_CONFIG_GLOBAL_BIN_DIR',
@@ -30,7 +32,8 @@ export interface UninstallOptions {
   confirm: (root: string) => Promise<boolean>;
   stopServices: () => Promise<void>;
   clean: () => Promise<void>;
-  removePackage: () => Promise<PackageRemovalResult | void>;
+  preparePackageRemoval?: () => GlobalPackageManager;
+  removePackage: (manager?: GlobalPackageManager) => Promise<PackageRemovalResult | void>;
   write: (message: string) => void;
 }
 
@@ -68,7 +71,7 @@ async function validatePrivateDataRoot(paths: BrcPaths): Promise<string> {
   }
 
   const protectedTrees = [
-    ...PNPM_PATHS.map((name) => process.env[name]),
+    ...PACKAGE_MANAGER_ENV_PATHS.map((name) => process.env[name]),
     path.join(os.homedir(), '.brc'),
     path.join(os.homedir(), '.brc-relay'),
   ].filter((value): value is string => Boolean(value));
@@ -119,11 +122,12 @@ export async function uninstallBrc(options: UninstallOptions): Promise<void> {
     return;
   }
 
+  const manager = options.preparePackageRemoval?.();
   await options.stopServices();
   await options.clean();
   const report = await removeBrcData(options.paths);
   const hasResiduals = writeRemovalReport(report, options.write);
-  const result = await options.removePackage();
+  const result = await options.removePackage(manager);
   const packageRemoval = result?.scheduled && result.reportPath
     ? `BRC package removal scheduled; completion report: ${result.reportPath}`
     : 'BRC package removed.';
@@ -132,49 +136,23 @@ export async function uninstallBrc(options: UninstallOptions): Promise<void> {
     : `BRC data removed. ${packageRemoval}`);
 }
 
-function resolvePnpmCommand(): { command: string; isShim: boolean } {
-  if (process.platform !== 'win32') return { command: 'pnpm', isShim: false };
-  const result = spawnSync('where.exe', ['pnpm'], { encoding: 'utf8', windowsHide: true });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`where.exe pnpm failed: ${result.stderr.trim()}`);
-  const commands = result.stdout.split(/\r?\n/).filter(Boolean);
-  const command = commands.find((candidate) => /\.exe$/i.test(candidate))
-    ?? commands.find((candidate) => /\.(?:cmd|bat)$/i.test(candidate));
-  if (!command) throw new Error('where.exe pnpm found no executable command.');
-  return { command, isShim: /\.(?:cmd|bat)$/i.test(command) };
+export function detectGlobalBrcPackageManager(): GlobalPackageManager {
+  return globalPackageRemoval.detectManager();
 }
 
-function runPnpmRemove(): void {
-  const { command, isShim } = resolvePnpmCommand();
-  const args = ['remove', '--global', PACKAGE_NAME];
-  const cmdLine = [`"${command.replaceAll('"', '""')}"`, ...args.map((arg) => `"${arg.replaceAll('"', '""')}"`)].join(' ');
-  const result = spawnSync(
-    isShim ? process.env.ComSpec || 'cmd.exe' : command,
-    isShim ? ['/d', '/s', '/c', `"${cmdLine}"`] : args,
-    {
-      cwd: os.tmpdir(),
-      encoding: 'utf8',
-      windowsHide: true,
-      windowsVerbatimArguments: isShim,
-      maxBuffer: 4 * 1024 * 1024,
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`pnpm remove failed with exit code ${result.status}: ${(result.stderr || result.stdout).trim()}`);
-  }
-}
-
-export async function removeGlobalBrcPackage(): Promise<PackageRemovalResult> {
+export async function removeGlobalBrcPackage(manager?: GlobalPackageManager): Promise<PackageRemovalResult> {
+  if (!manager) throw new Error('Global package manager was not identified.');
   if (process.platform !== 'win32') {
-    runPnpmRemove();
+    globalPackageRemoval.remove(manager);
     return { scheduled: false };
   }
 
-  const reportPath = path.join(os.tmpdir(), `brc-uninstall-${randomUUID()}.json`);
-  await writeFile(reportPath, JSON.stringify({ package: PACKAGE_NAME, status: 'pending', scheduledAt: new Date().toISOString() }));
+  const reportPath = path.join(os.tmpdir(), 'brc-uninstall-' + randomUUID() + '.json');
+  await writeFile(reportPath, JSON.stringify({
+    package: PACKAGE_NAME, manager, status: 'pending', scheduledAt: new Date().toISOString(),
+  }));
   const workerPath = fileURLToPath(new URL('./uninstall-worker.js', import.meta.url));
-  const worker = spawn(process.execPath, [workerPath, String(process.pid), reportPath, PACKAGE_NAME], {
+  const worker = spawn(process.execPath, [workerPath, String(process.pid), reportPath, PACKAGE_NAME, manager], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,

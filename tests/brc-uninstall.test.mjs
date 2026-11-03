@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { uninstallBrc } from '../packages/cli/dist/maintenance/uninstall.js';
+import { identifyGlobalPackageManager, packageRemovalArguments, BRC_PACKAGE_NAME } from '../packages/cli/dist/maintenance/global-package.js';
 import { DEFAULT_SETTINGS } from '../packages/cli/dist/config/settings.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { inspectProcess, ProcessManager } from '../packages/cli/dist/lifecycle/processes.js';
@@ -43,6 +44,38 @@ function dependencies(fixture, overrides = {}) {
     ...overrides,
   };
 }
+
+test('package removal follows the global installation owner', () => {
+  const pnpmRoot = path.join(os.tmpdir(), 'pnpm-global', 'v11');
+  const npmRoot = path.join(os.tmpdir(), 'npm-global', 'node_modules');
+  const roots = { pnpm: pnpmRoot, npm: npmRoot };
+  const pnpmPackage = path.join(pnpmRoot, 'installation', 'node_modules', '@inoceanlee', 'brc', 'dist', 'cli.js');
+  const npmPackage = path.join(npmRoot, '@inoceanlee', 'brc', 'dist', 'cli.js');
+
+  assert.equal(identifyGlobalPackageManager(pnpmPackage, roots), 'pnpm');
+  assert.equal(identifyGlobalPackageManager(npmPackage, roots), 'npm');
+  assert.equal(identifyGlobalPackageManager(path.join(os.tmpdir(), 'source', 'brc', 'cli.js'), roots), undefined);
+  assert.equal(identifyGlobalPackageManager(pnpmPackage, { pnpm: pnpmRoot, npm: pnpmRoot }), undefined);
+  assert.deepEqual(packageRemovalArguments('pnpm'), ['remove', '--global', BRC_PACKAGE_NAME]);
+  assert.deepEqual(packageRemovalArguments('npm'), ['uninstall', '--global', BRC_PACKAGE_NAME]);
+});
+
+test('package manager preflight failure keeps services and private data intact', async (t) => {
+  const fixtureRoot = await fixture(t);
+  const marker = path.join(fixtureRoot.paths.data, 'keep.txt');
+  await writeFile(marker, 'private data');
+  const calls = [];
+
+  await assert.rejects(uninstallBrc(dependencies(fixtureRoot, {
+    preparePackageRemoval: () => { calls.push('preflight'); throw new Error('unknown package manager'); },
+    stopServices: async () => calls.push('stop'),
+    clean: async () => calls.push('clean'),
+    removePackage: async () => calls.push('remove'),
+  })), /unknown package manager/);
+
+  assert.deepEqual(calls, ['preflight']);
+  assert.equal(await readFile(marker, 'utf8'), 'private data');
+});
 
 test('cancelled uninstall leaves services, package, and private data untouched', async (t) => {
   const fixtureRoot = await fixture(t);
