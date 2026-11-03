@@ -11,7 +11,10 @@
     "dist",
     "deploy",
     "README.md",
-    "LICENSE"
+    "README_zh.md",
+    "LICENSE",
+    "SECURITY.md",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json"

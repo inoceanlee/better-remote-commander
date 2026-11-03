@@ -13,7 +13,10 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const requiredFiles = [
   'package/package.json',
   'package/README.md',
+  'package/README_zh.md',
   'package/LICENSE',
+  'package/SECURITY.md',
+  'package/NOTICE',
   'package/dist/cli.js',
   'package/dist/native/win32-x64/brc-process.exe',
   'package/dist/services/relay/cli.js',
@@ -210,6 +213,11 @@ test('single package tarball is complete, self-contained, and globally installab
   assert.match(readme, /pnpm up -g @inoceanlee\/brc --latest/);
   assert.match(readme, /brc uninstall/);
   assert.match(readme, /pnpm remove -g @inoceanlee\/brc/);
+  assert.match(readme, /\[简体中文\]\(README_zh\.md\)/);
+  const chineseReadme = run('tar', ['-xOf', tarball, 'package/README_zh.md']);
+  assert.match(chineseReadme, /\[English\]\(README\.md\)/);
+  assert.match(readme, /\[SECURITY\.md\]\(SECURITY\.md\)/);
+  assert.match(readme, /\[NOTICE\]\(NOTICE\)/);
 
   const inspectionDir = path.join(root, 'inspection');
   const extractedPackage = path.join(inspectionDir, 'package');

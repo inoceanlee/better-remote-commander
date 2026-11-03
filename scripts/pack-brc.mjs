@@ -160,13 +160,14 @@ try {
   await cp(path.join(packageDir, 'shared', 'dist'), path.join(stageDir, 'vendor', 'brc-shared', 'dist'), { recursive: true });
   await writeFile(path.join(stageDir, 'vendor', 'brc-shared', 'package.json'), JSON.stringify(bundledSharedManifest, null, 2));
   await cp(path.join(workspaceRoot, 'deploy', 'traefik'), path.join(stageDir, 'deploy', 'traefik'), { recursive: true });
-  await cp(path.join(workspaceRoot, 'README.md'), path.join(stageDir, 'README.md'));
-  await cp(path.join(workspaceRoot, 'LICENSE'), path.join(stageDir, 'LICENSE'));
+  for (const name of cliManifest.files.filter((file) => !['dist', 'deploy'].includes(file))) {
+    await cp(path.join(workspaceRoot, name), path.join(stageDir, name));
+  }
 
   const packageManifest = {
     ...cliManifest,
     version: releaseVersion,
-    files: ['dist', 'deploy', 'README.md', 'LICENSE'],
+    files: cliManifest.files,
     dependencies,
     bundledDependencies: Object.keys(dependencies),
   };
