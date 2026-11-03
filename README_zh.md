@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-本项目能够帮助你充分利用各家 AI 的聊天端资源，如当前 Chat 暂时免费的 GPT，以及 Chat 额度与 Coding 额度分开的 Gemini，实现 Chat 端对于本地电脑的安全操控，让你在日常对话中获取到和本地 Harness 近乎相同的 Agent 能力，包括管理文件、运行终端命令并查看系统状态。
+BRC 通过自托管 MCP 服务，将兼容的 AI 聊天端连接到本地电脑，提供文件管理、终端命令执行和系统状态查看能力。各家 AI 的使用额度及远程 MCP 支持情况，以对应服务和账号为准。
 
-本项目基于 [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander) 重写，专为 Windows、Linux 和 macOS 全平台运行时自适应优化。
+本项目基于 [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander)，支持 Windows、Linux 和 macOS。
 
 ## 工作原理
 
@@ -105,7 +105,7 @@ brc logs agent
 | `brc config path`                  | 显示配置文件存放路径             |
 | `brc update traefik`               | 检查并更新 Traefik 组件          |
 | `brc clean`                        | 清理临时运行时数据与无效锁       |
-| `brc uninstall`                    | 停止服务、删除数据并卸载 BRC      |
+| `brc uninstall`                    | 停止服务、删除数据并卸载 BRC     |
 
 更新 BRC 版本：
 
@@ -160,5 +160,3 @@ Windows 会在 BRC 命令退出后再执行包卸载。若卸载失败，可查�
 ## 许可协议与安全
 
 安全规范参见 [SECURITY.md](SECURITY.md)，开源协议参见 [LICENSE](LICENSE)，第三方工具归属详见 [NOTICE](NOTICE)。
-
-—— 20261102

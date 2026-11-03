@@ -2,9 +2,9 @@
 
 English | [简体中文](README_zh.md)
 
-BRC helps you make full use of chat allowances across AI providers—such as ChatGPT's currently free tier, or Gemini's separate chat and coding quotas—to safely control your computer from a chat window. This brings agent capabilities close to a local harness directly into everyday conversations, including file management, terminal command execution, and system status monitoring.
+BRC connects compatible AI chat clients to tools on your computer through a self-hosted MCP server. You can manage files, run terminal commands, and inspect system status. Service allowances and remote MCP support depend on each AI provider and account.
 
-Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander), rewritten and optimized with runtime auto-adaptation for Windows, Linux, and macOS.
+Based on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander), with support for Windows, Linux, and macOS.
 
 ## How It Works
 
@@ -105,7 +105,7 @@ In an AI chat client that supports remote MCP servers, add `https://your-domain.
 | `brc config path`                  | Display configuration file path                |
 | `brc update traefik`               | Check and update Traefik binary                |
 | `brc clean`                        | Clean temporary runtime data and invalid locks |
-| `brc uninstall`                    | Stop services, delete data, and remove BRC       |
+| `brc uninstall`                    | Remove services, data, and package             |
 
 Update BRC to the latest version:
 
@@ -160,5 +160,3 @@ On Windows, package removal starts after the command exits. Check the removal re
 ## License and Security
 
 See [SECURITY.md](SECURITY.md) for security guidelines, [LICENSE](LICENSE) for the open-source license, and [NOTICE](NOTICE) for third-party attributions.
-
-—— 20261102
