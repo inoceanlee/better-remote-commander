@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { createGunzip, createGzip } from 'node:zlib';
@@ -160,8 +160,18 @@ try {
   await cp(path.join(packageDir, 'shared', 'dist'), path.join(stageDir, 'vendor', 'brc-shared', 'dist'), { recursive: true });
   await writeFile(path.join(stageDir, 'vendor', 'brc-shared', 'package.json'), JSON.stringify(bundledSharedManifest, null, 2));
   await cp(path.join(workspaceRoot, 'deploy', 'traefik'), path.join(stageDir, 'deploy', 'traefik'), { recursive: true });
-  for (const name of cliManifest.files.filter((file) => !['dist', 'deploy'].includes(file))) {
-    await cp(path.join(workspaceRoot, name), path.join(stageDir, name));
+  const sourceDocuments = (await readdir(workspaceRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name);
+  for (const pattern of cliManifest.files.filter((file) => !['dist', 'deploy'].includes(file))) {
+    const extension = /^\*\.([^.*/]+)$/.exec(pattern)?.[1];
+    if (pattern.includes('*') && !extension) throw new Error('Unsupported package document pattern: ' + pattern);
+    const matching = sourceDocuments.filter((name) =>
+      extension ? name.endsWith('.' + extension) : name === pattern);
+    if (!matching.length) throw new Error('Missing package document matching ' + pattern);
+    for (const name of matching) {
+      await cp(path.join(workspaceRoot, name), path.join(stageDir, name));
+    }
   }
 
   const packageManifest = {

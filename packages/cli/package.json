@@ -10,10 +10,8 @@
   "files": [
     "dist",
     "deploy",
-    "README.md",
-    "README_zh.md",
+    "*.md",
     "LICENSE",
-    "SECURITY.md",
     "NOTICE"
   ],
   "scripts": {

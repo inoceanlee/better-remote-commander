@@ -13,9 +13,7 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const requiredFiles = [
   'package/package.json',
   'package/README.md',
-  'package/README_zh.md',
   'package/LICENSE',
-  'package/SECURITY.md',
   'package/NOTICE',
   'package/dist/cli.js',
   'package/dist/native/win32-x64/brc-process.exe',
@@ -185,6 +183,12 @@ test('single package tarball is complete, self-contained, and globally installab
 
   for (const name of requiredFiles) {
     assert.ok(files.has(name), `tarball is missing ${name}`);
+  }
+  // All root-level Markdown documents are included without maintaining a second file list.
+  for (const name of (await readdir(repoRoot)).filter((filename) => filename.endsWith('.md'))) {
+    if ((await stat(path.join(repoRoot, name))).isFile()) {
+      assert.ok(files.has('package/' + name), `tarball is missing ${name}`);
+    }
   }
   for (const name of names) {
     assert.ok(!forbiddenFiles.some((pattern) => pattern.test(name)), `tarball contains excluded path ${name}`);
