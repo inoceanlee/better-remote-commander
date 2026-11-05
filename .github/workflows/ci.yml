@@ -30,7 +30,12 @@ jobs:
       - if: runner.os == 'Windows'
         run: cargo test --locked --manifest-path native/brc-process/Cargo.toml
       - if: runner.os == 'Windows'
-        run: pnpm test:unit
+        shell: pwsh
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          chcp 65001 > $null
+          pnpm test:unit
       - if: runner.os != 'Windows'
         run: node --test tests/brc-cross-platform.test.mjs tests/brc-platform.test.mjs tests/brc-agent-shell-coordinator.test.mjs
       - if: runner.os == 'Windows'
