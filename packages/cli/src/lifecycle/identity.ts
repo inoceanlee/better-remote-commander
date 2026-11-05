@@ -87,7 +87,8 @@ async function inspectNonWindows(pid: number): Promise<ProcessIdentity | null> {
         readFile(`/proc/${pid}/stat`, 'utf8'), realpath(`/proc/${pid}/exe`), readFile(`/proc/${pid}/cmdline`),
       ]);
     } catch (error) {
-      if (errorCode(error) === 'ENOENT') return null;
+      const err = errorCode(error);
+      if (err === 'ENOENT' || err === 'EACCES' || err === 'EPERM') return null;
       throw error;
     }
     const closeParen = stat.lastIndexOf(')');
