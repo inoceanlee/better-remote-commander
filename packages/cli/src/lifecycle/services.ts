@@ -54,7 +54,7 @@ export function createDefaultServices(
     HOST: '127.0.0.1',
     PORT: String(relay),
     PUBLIC_URL: settings.services.publicUrl || proxyUrl,
-    TRUST_PROXY: 'false',
+    TRUST_PROXY: 'true',
     BRC_DB: path.join(paths.data, 'relay.sqlite'),
     BRC_LOG_FILE: path.join(paths.logs, 'relay.log'),
   };

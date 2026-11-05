@@ -9,7 +9,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 import { ProcessManager, inspectProcess } from '../packages/cli/dist/lifecycle/processes.js';
 import { inspectProcesses } from '../packages/cli/dist/lifecycle/identity.js';
-import { ServiceManager } from '../packages/cli/dist/lifecycle/services.js';
+import { ServiceManager, createDefaultServices } from '../packages/cli/dist/lifecycle/services.js';
+import { DEFAULT_SETTINGS } from '../packages/cli/dist/config/settings.js';
 import { LifecycleLock } from '../packages/cli/dist/lifecycle/lock.js';
 import { startManagedControlServer } from '../packages/shared/dist/managed-control.js';
 
@@ -812,4 +813,12 @@ test('start automatically evicts record belonging to another workspace and recov
   await serviceManager.start();
   const statusAfter = await serviceManager.status();
   assert.equal(statusAfter[0].state, 'running');
+});
+
+test('createDefaultServices configures TRUST_PROXY to true for relay', () => {
+  const dummyPaths = paths(os.tmpdir());
+  const services = createDefaultServices(dummyPaths, DEFAULT_SETTINGS);
+  const relay = services.find((s) => s.name === 'relay');
+  assert.ok(relay, 'relay service must exist');
+  assert.equal(relay.env.TRUST_PROXY, 'true');
 });
