@@ -43,3 +43,11 @@ test('Windows inspector fails closed when its packaged binary is missing', async
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('Windows inspector maps OPEN_PROCESS errors to null instead of throwing', async () => {
+  if (process.platform !== 'win32') return;
+  const { inspectProcesses } = await import('../packages/cli/dist/lifecycle/identity.js');
+  // On Windows, PID 4 (System) always returns OPEN_PROCESS from OpenProcess for non-admin callers
+  const result = await inspectProcesses([4]);
+  assert.equal(result.get(4), null);
+});
