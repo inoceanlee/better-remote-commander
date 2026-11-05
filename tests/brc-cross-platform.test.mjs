@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 
 import { PlatformEnvironment } from '../packages/cli/dist/config/platform-environment.js';
 import { resolveBrcPaths } from '../packages/cli/dist/config/paths.js';

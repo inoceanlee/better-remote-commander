@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import path from 'node:path';
 import { PlatformEnvironment } from '../packages/cli/dist/config/platform-environment.js';
 import { resolveBrcPaths } from '../packages/cli/dist/config/paths.js';
 import { parseRelease } from '../packages/cli/dist/traefik/core.js';
