@@ -81,9 +81,10 @@ test('PlatformEnvironment prioritizes BRC_DATA_ROOT across all platforms', () =>
 });
 
 test('resolveBrcPaths maintains backwards compatibility with process env', () => {
-  const paths = resolveBrcPaths({ BRC_DATA_ROOT: 'C:\\DirectOverride' });
-  assert.equal(paths.root, 'C:\\DirectOverride');
-  assert.equal(paths.config, 'C:\\DirectOverride\\config');
+  const override = process.platform === 'win32' ? 'C:\\DirectOverride' : '/tmp/brc-direct-override';
+  const paths = resolveBrcPaths({ BRC_DATA_ROOT: override });
+  assert.equal(paths.root, override);
+  assert.equal(paths.config, path.join(override, 'config'));
 });
 
 test('PlatformEnvironment maps platforms and architectures to Traefik targets', () => {
@@ -158,7 +159,9 @@ test('parseRelease parses official Traefik releases with target platform and arc
     ],
   };
 
-  const defaultRelease = parseRelease(releaseData);
+  const defaultRelease = parseRelease(releaseData, {
+    platform: 'windows', arch: 'amd64', archiveExt: 'zip', executableName: 'traefik.exe',
+  });
   assert.equal(defaultRelease.version, '3.7.17');
   assert.equal(defaultRelease.archiveName, 'traefik_v3.7.17_windows_amd64.zip');
   assert.equal(defaultRelease.archiveUrl, 'https://github.com/traefik/traefik/releases/download/v3.7.17/traefik_v3.7.17_windows_amd64.zip');

@@ -281,7 +281,7 @@ export class ShellEncodingCoordinator {
       if (!this.shellPath) {
         return 'cmd';
       }
-      const shellName = path.basename(this.shellPath).toLowerCase();
+      const shellName = path.win32.basename(this.shellPath).toLowerCase();
       if (shellName === 'pwsh' || shellName === 'pwsh.exe' || shellName === 'powershell' || shellName === 'powershell.exe') {
         return 'powershell';
       }

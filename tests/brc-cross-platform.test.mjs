@@ -376,9 +376,10 @@ test('PlatformEnvironment honors XDG_DATA_HOME on Linux and falls back when miss
 });
 
 test('resolveBrcPaths backward-compatibility wrapper respects process and option overrides', () => {
-  const direct = resolveBrcPaths({ BRC_DATA_ROOT: 'C:\\DirectOverridePath' });
-  assert.equal(direct.root, 'C:\\DirectOverridePath');
-  assert.equal(direct.config, 'C:\\DirectOverridePath\\config');
+  const override = process.platform === 'win32' ? 'C:\\DirectOverridePath' : '/tmp/brc-direct-override';
+  const direct = resolveBrcPaths({ BRC_DATA_ROOT: override });
+  assert.equal(direct.root, override);
+  assert.equal(direct.config, path.join(override, 'config'));
 });
 
 /* -------------------------------------------------------------------------- */
