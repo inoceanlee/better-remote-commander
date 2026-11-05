@@ -56,16 +56,19 @@ test('unpublished owner is preserved on lock contention', async (t) => {
   assert.ok((await stat(path.join(paths.runtime, 'lifecycle.lock'))).isDirectory());
 });
 
-test('live lock is never stolen, even with forged creation time', async (t) => {
+test('reclaims a lock whose owner PID has been reused across reboots', async (t) => {
   const paths = await sandbox(t);
   const owner = await inspectProcess(process.pid);
   assert.ok(owner);
   await mkdir(path.join(paths.runtime, 'lifecycle.lock'));
+  // Simulate a lock written before reboot with different createdAt/token but current PID
   await writeFile(path.join(paths.runtime, 'lifecycle.lock', 'owner.json'), JSON.stringify({
-    ...owner, createdAt: '0', workspaceRoot: paths.root, token: 'fake-valid-token', version: 1,
+    ...owner, createdAt: '0', workspaceRoot: paths.root, token: '12345678-1234-4234-8234-123456789abc', version: 1,
   }));
-  await assert.rejects(() => new LifecycleLock(paths, { waitMs: 90, pollMs: 15 }).runExclusive(async () => {}));
-  assert.ok((await stat(path.join(paths.runtime, 'lifecycle.lock'))).isDirectory());
+  const store = new (await import('../packages/cli/dist/lifecycle/lock-store.js')).LockStore(paths);
+  // Must reclaim the stale lock because identity does not match the live process identity
+  assert.equal(await store.reclaimExpired(inspectProcess), true);
+  assert.equal((await readdir(paths.runtime)).filter((x) => x === 'lifecycle.lock').length, 0);
 });
 
 test('release preserves a replaced lock directory', async (t) => {

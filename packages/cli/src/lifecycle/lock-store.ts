@@ -143,15 +143,18 @@ export class LockStore {
     const snapshot = await this.readOwner();
     const identity = await inspect(snapshot.owner.pid);
     if (identity) {
-      // A reused PID is not sufficient evidence to delete the previous owner's lock.
-      if (identity.createdAt !== snapshot.owner.createdAt
-        || identity.executablePath !== snapshot.owner.executablePath
-        || identity.commandLine !== snapshot.owner.commandLine) {
-        throw new Error('Lifecycle lock PID was reused or its owner identity changed.');
-      }
-      return false;
+      const isOwner = identity.createdAt === snapshot.owner.createdAt
+        && identity.executablePath === snapshot.owner.executablePath
+        && identity.commandLine === snapshot.owner.commandLine;
+      if (isOwner) return false;
     }
-    await this.isolateAndDelete(snapshot, async () => (await inspect(snapshot.owner.pid)) === null);
+    await this.isolateAndDelete(snapshot, async () => {
+      const current = await inspect(snapshot.owner.pid);
+      if (!current) return true;
+      return current.createdAt !== snapshot.owner.createdAt
+        || current.executablePath !== snapshot.owner.executablePath
+        || current.commandLine !== snapshot.owner.commandLine;
+    });
     return true;
   }
 }
