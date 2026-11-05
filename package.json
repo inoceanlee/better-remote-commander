@@ -1,6 +1,7 @@
 {
  "name": "brc",
  "private": true,
+ "repository": "https://github.com/inoceanlee/brc.git",
  "description": "Better Remote Commander (BRC) - self-hosted remote desktop agent + MCP relay for Claude and ChatGPT",
  "license": "MIT",
  "packageManager": "pnpm@11.24.0",
