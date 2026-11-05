@@ -822,3 +822,35 @@ test('createDefaultServices configures TRUST_PROXY to true for relay', () => {
   assert.ok(relay, 'relay service must exist');
   assert.equal(relay.env.TRUST_PROXY, 'true');
 });
+
+test('reused PID belonging to foreign inaccessible system process is evicted and starts cleanly', async (t) => {
+  if (process.platform !== 'win32') return;
+  const harness = await makeHarness(t);
+  // On Windows, PID 4 is always System process.
+  // Simulate a leftover record from before reboot whose PID is now 4.
+  const foreignRecord = {
+    version: 1,
+    id: '12345678-1234-4234-8234-123456789abc',
+    service: harness.spec.name,
+    pid: 4,
+    createdAt: '123456789',
+    executablePath: process.execPath,
+    commandLine: 'node test',
+    workspaceRoot: harness.spec.workspaceRoot,
+    entrypoint: harness.spec.entrypoint,
+    controlPort: 12345,
+    controlToken: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  };
+  await writeFile(path.join(harness.paths.runtime, `${harness.spec.name}.json`), JSON.stringify(foreignRecord, null, 2));
+
+  // Inspecting status must not crash or degrade: PID 4 returned null from inspector, so status is stopped!
+  const status = await harness.manager.status(harness.spec);
+  assert.equal(status.state, 'stopped');
+
+  // Start must cleanly evict and start the actual service
+  const serviceManager = new ServiceManager(harness.paths, [harness.spec], harness.manager, new LifecycleLock(harness.paths));
+  await serviceManager.start();
+  const statusAfter = await serviceManager.status();
+  assert.equal(statusAfter[0].state, 'running');
+  assert.notEqual(statusAfter[0].pid, 4);
+});
